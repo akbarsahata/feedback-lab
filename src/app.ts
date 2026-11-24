@@ -1,3 +1,4 @@
+import { handleAssignmentsApi } from './api';
 import {
   createSession,
   clearSessionCookie,
@@ -8,7 +9,7 @@ import {
   sessionCookie,
   type SessionUser,
 } from './auth';
-import { escapeHtml, messagePage, signInPage } from './html';
+import { messagePage, signInPage } from './html';
 import { htmlResponse, jsonResponse, methodNotAllowed, redirect } from './http';
 import { verifyPassword } from './password';
 
@@ -61,6 +62,10 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   if (path === '/') {
     return redirect('/assignments');
+  }
+
+  if (path === '/api/assignments' || path.startsWith('/api/assignments/')) {
+    return handleAssignmentsApi(request, env, path);
   }
 
   return notFound(request, await getSession(env.DB, request));
@@ -151,14 +156,4 @@ export function safeNext(value: string | null): string {
   return value;
 }
 
-export function forbiddenPage(session: SessionUser, detail: string): string {
-  return messagePage({
-    title: 'Researcher access required',
-    message: detail,
-    user: session,
-  });
-}
 
-export function escapeForHtml(value: string): string {
-  return escapeHtml(value);
-}

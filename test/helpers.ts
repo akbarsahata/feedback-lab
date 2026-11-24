@@ -87,7 +87,9 @@ export async function apiFetch(
 ): Promise<Response> {
   const { session, ...rest } = init;
   const headers = new Headers(rest.headers);
-  headers.set('origin', BASE_URL);
+  if (!headers.has('origin')) {
+    headers.set('origin', BASE_URL);
+  }
   if (session !== undefined) {
     headers.set('cookie', session.cookie);
   }
