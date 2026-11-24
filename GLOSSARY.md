@@ -4,6 +4,12 @@ Feedback Lab helps instructors inspect AI feedback on introductory Python assign
 
 ## Language
 
+**Assignment**  
+A Python exercise with a stable identity across revisions and one active version.
+
+**Assignment version**  
+An immutable snapshot of an assignment's task and format, including the exact rubric and test suite versions in use.
+
 **Function assignment**  
 A Python exercise whose test cases call a named function and check the value it returns.
 
@@ -12,6 +18,12 @@ A Python exercise whose test cases supply text as standard input and check the t
 
 **Rubric criterion**  
 An expectation used to assess a submission. Its stable identifier lets a feedback comment cite the exact criterion in the rubric version used.
+
+**Rubric version**  
+An immutable, ordered set of rubric criteria used to assess submissions for an assignment.
+
+**Test suite version**  
+An immutable, ordered set of tests and their expected outcomes for an assignment.
 
 **Submission version**  
 A particular snapshot of a synthetic Python submission, including the source that was tested and reviewed.
