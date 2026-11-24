@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Feedback Lab · Clickable wireframe</title>
+<style>
+:root{--bg:#f5f6f8;--surface:#fff;--ink:#192437;--muted:#546176;--line:#d7dee8;--accent:#294fd2;--soft:#e9eeff;--ok:#146447;--ok-bg:#e8f4ee;--warn:#80510b;--warn-bg:#fff3d9}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+button,input,textarea{font:inherit}button,a,input,textarea{outline-offset:4px}a{color:var(--accent)}button,.button{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:8px 13px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink);font-weight:650;text-decoration:none;cursor:pointer}button:hover,.button:hover{border-color:var(--accent)}.primary{background:var(--accent);border-color:var(--accent);color:white}.primary:hover{background:#1c3db6}
+.shell{display:grid;grid-template-columns:210px minmax(0,1fr);min-height:100vh}.rail{border-right:1px solid var(--line);background:#fff;padding:26px 16px}.brand{display:flex;align-items:center;gap:9px;color:var(--ink);text-decoration:none;font-size:17px;font-weight:750;padding:0 8px}.mark{background:var(--accent);border-radius:7px;color:white;width:29px;height:29px;display:grid;place-items:center;font:700 13px monospace}.nav{display:grid;gap:5px;margin-top:38px}.nav a{padding:9px 10px;border-radius:7px;display:flex;align-items:center;gap:9px;text-decoration:none;color:var(--muted);font-weight:620}.nav a[aria-current=page]{background:var(--soft);color:#203dab}.nav a:hover{background:var(--bg)}.nav .icon{width:15px;text-align:center}
+.workspace{min-width:0}.bar{background:#fff;border-bottom:1px solid var(--line);min-height:64px;padding:13px 30px;display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--muted);font-size:13px}.wrap{max-width:1210px;margin:auto;padding:32px 30px 46px}.head{display:flex;align-items:start;justify-content:space-between;gap:16px;margin-bottom:24px}h1{font-size:32px;letter-spacing:-.035em;line-height:1.15;margin:0 0 7px}h2{font-size:18px;line-height:1.3;margin:0 0 6px}h3{font-size:15px;margin:0 0 4px}p{margin:0 0 12px}.muted,.small{color:var(--muted)}.small{font-size:13px}.head p:last-child,.panel p:last-child{margin-bottom:0}
+.split{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(0,1fr);gap:16px;align-items:start}.equal{grid-template-columns:repeat(2,minmax(0,1fr))}.stack{display:grid;gap:16px}.panel{border:1px solid var(--line);border-radius:9px;background:var(--surface);overflow:hidden}.pad{padding:18px}.panel-top{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:8px}.panel-top h2{margin:0}.panel+.panel{margin-top:0}.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.end{margin-top:15px}.tag{display:inline-flex;align-items:center;font-size:12px;line-height:1.32;padding:4px 8px;border-radius:5px;color:#3e4b61;background:#eef1f6;white-space:nowrap;font-weight:650}.tag.ok{background:var(--ok-bg);color:var(--ok)}.tag.warn{background:var(--warn-bg);color:var(--warn)}.tag.info{background:var(--soft);color:#203dab}.tag.bad{background:#fbe9ea;color:#9b2331}
+.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;text-align:left}th,td{padding:12px 14px;border-bottom:1px solid #e4e9f0;vertical-align:middle}th{background:#f8f9fb;color:var(--muted);font-size:12px;font-weight:750}tr:last-child td{border-bottom:0}td a{font-weight:650}td.compact{white-space:nowrap}.row{padding:13px 0;display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid #e4e9f0}.row:first-child{border-top:0}.row:last-child{padding-bottom:0}
+label{display:grid;gap:5px;min-width:0;font-weight:650}input,textarea{min-width:0;width:100%;padding:8px 10px;border:1px solid #bbc7d7;border-radius:6px;background:#fff;color:var(--ink)}textarea{min-height:78px;resize:vertical}.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}.wide{grid-column:1/-1}.field{display:grid;gap:8px}.metric-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.metric{border:1px solid var(--line);border-radius:8px;padding:13px;background:white}.metric strong{display:block;font-size:23px;line-height:1.2;margin:2px 0 3px}.mono,code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.code{background:#f6f8fb;padding:8px 0;overflow:auto;font:13px/1.8 ui-monospace,SFMono-Regular,Menlo,monospace}.line{padding:1px 13px;white-space:pre}.line em{display:inline-block;color:#53627a;width:27px;font-style:normal}.line.hot{background:#e7edff;border-left:3px solid var(--accent);padding-left:10px}.code-note{padding:9px 14px;font-size:12px;color:var(--muted);border-top:1px solid var(--line)}
+.comments article{padding:16px 17px;border-bottom:1px solid #e4e9f0}.comments article:last-child{border:0}.comments article.active{box-shadow:inset 3px 0 var(--accent);background:#f9faff}.comment-title{display:flex;align-items:start;justify-content:space-between;gap:8px;margin-bottom:7px}.comment-title button{border:0;padding:0;background:transparent;text-align:left;color:var(--ink);justify-content:start}.comment-title button:hover{text-decoration:underline}.callout{padding:10px 13px;border:1px solid #eed398;border-radius:7px;color:#68440e;background:#fff8e9}.notice{margin-bottom:16px;font-size:13px}.footnote{color:var(--muted);font-size:12px;padding-top:18px}dialog{border:1px solid var(--line);border-radius:10px;width:min(480px,calc(100vw - 28px));padding:22px;color:var(--ink)}dialog::backdrop{background:#17243a66}.right{margin-left:auto}.check{display:flex;align-items:center;gap:8px;font-weight:500}.check input{width:auto}.page[hidden]{display:none}#status:empty{display:none}#status{background:var(--soft);color:#203dab;border-radius:7px;padding:8px 12px}
+@media(max-width:920px){.shell{grid-template-columns:165px minmax(0,1fr)}.rail{padding-inline:10px}.wrap,.bar{padding-inline:20px}.split{grid-template-columns:1fr}.metric-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:600px){.shell{display:block}.rail{padding:13px;border-right:0;border-bottom:1px solid var(--line)}.nav{margin:12px 0 0;display:flex;overflow:auto}.nav a{white-space:nowrap;padding:6px 8px;font-size:13px}.nav .icon{display:none}.wrap,.bar{padding-inline:14px}.wrap{padding-top:22px}.bar{min-height:48px}.head{flex-wrap:wrap}h1{font-size:27px}.pad{padding:14px}.fields{grid-template-columns:1fr}.metric-grid{grid-template-columns:1fr}th,td{padding:9px 10px}.comment-title{flex-wrap:wrap}}
+</style>
+</head>
+<body>
+<div class="shell">
+<aside class="rail">
+  <a class="brand" href="#assignments"><span class="mark" aria-hidden="true">&lt;/&gt;</span>Feedback Lab</a>
+  <nav class="nav" aria-label="Main navigation">
+    <a href="#assignments" data-nav="assignments"><span class="icon" aria-hidden="true">▤</span>Assignments</a>
+    <a href="#submissions" data-nav="submissions"><span class="icon" aria-hidden="true">▱</span>Submissions</a>
+    <a href="#review" data-nav="review"><span class="icon" aria-hidden="true">◫</span>Feedback review</a>
+    <a href="#evaluation" data-nav="evaluation"><span class="icon" aria-hidden="true">▥</span>Evaluation</a>
+  </nav>
+</aside>
+<div class="workspace">
+  <header class="bar"><span id="breadcrumb">Assignments</span><span class="tag">Prototype · synthetic data</span></header>
+  <main class="wrap" id="main">
+    <p id="status" role="status"></p>
+
+    <section class="page" id="assignments" aria-labelledby="title-assignments">
+      <div class="head"><div><h1 id="title-assignments">Assignments</h1><p class="muted">Choose a Python assignment to review or evaluate.</p></div><a class="button primary" href="#setup">Configure assignment</a></div>
+      <div class="panel">
+        <div class="panel-top"><h2>Assignment library</h2><span class="tag">1 assignment</span></div>
+        <div class="table-wrap"><table><thead><tr><th>Assignment</th><th>Rubric</th><th>Tests</th><th>Submissions</th><th></th></tr></thead><tbody>
+          <tr><td><strong data-assignment>First positive value</strong><br><span class="small">PY-01 · Introductory Python</span></td><td>2 criteria</td><td>3 cases</td><td>2 versions</td><td class="compact"><a href="#submissions">View submissions →</a></td></tr>
+        </tbody></table></div>
+      </div>
+      <div class="panel pad end">
+        <h2>Paired evaluation case</h2><p class="muted">A function skips the first element. The revised submission corrects one loop boundary, while its empty-input behavior stays the same.</p>
+        <a class="button" href="#evaluation">Open evaluation setup</a>
+      </div>
+    </section>
+
+    <section class="page" id="setup" aria-labelledby="title-setup" hidden>
+      <div class="head"><div><h1 id="title-setup">Assignment setup</h1><p class="muted">Define the task, the rubric, and the tests that will support feedback.</p></div><button class="primary" form="assignment-form">Save assignment</button></div>
+      <form id="assignment-form" class="split">
+        <div class="stack">
+          <section class="panel pad fields" aria-label="Task details">
+            <label class="wide">Assignment title<input id="assignment-name" value="First positive value" required></label>
+            <label class="wide">Task instructions<textarea>Implement first_positive(values). Return the first positive integer, or None if the list is empty or has no positive values.</textarea></label>
+            <label>Language<input value="Python 3" readonly></label><label>Assignment ID<input value="PY-01" readonly></label>
+          </section>
+          <section class="panel"><div class="panel-top"><h2>Rubric</h2><span class="tag">v1</span></div><div class="pad field">
+            <label>R1 · Iteration<input value="Checks every item in order, starting at index 0"></label>
+            <label>R2 · Edge cases<input value="Returns None when no positive item exists"></label>
+          </div></section>
+        </div>
+        <div class="panel"><div class="panel-top"><h2>Test cases</h2><span class="tag">3 cases</span></div><div class="table-wrap"><table><thead><tr><th>ID</th><th>Input</th><th>Expected</th></tr></thead><tbody>
+          <tr><td>T01</td><td><code>[4, -1]</code></td><td><code>4</code></td></tr>
+          <tr><td>T02</td><td><code>[-2, 7]</code></td><td><code>7</code></td></tr>
+          <tr><td>T03</td><td><code>[]</code></td><td><code>None</code></td></tr>
+        </tbody></table></div></div>
+      </form>
+    </section>
+
+    <section class="page" id="submissions" aria-labelledby="title-submissions" hidden>
+      <div class="head"><div><h1 id="title-submissions">Submissions</h1><p class="muted" data-assignment>First positive value</p></div><button class="primary" id="show-tests">Run sample tests</button></div>
+      <div class="split">
+        <div class="stack">
+          <section class="panel"><div class="panel-top"><h2>Paired submissions</h2><span class="tag">Case P-014</span></div><div class="pad actions" role="group" aria-label="Choose submission version">
+            <button data-version="original" aria-pressed="true">Original · S-014A</button><button data-version="corrected" aria-pressed="false">Corrected · S-014B</button>
+          </div></section>
+          <section class="panel"><div class="panel-top"><h2>Submission code</h2><span class="mono small">solution.py</span></div><div class="code" id="submission-code"></div><div class="code-note" id="submission-note"></div></section>
+        </div>
+        <section class="panel"><div class="panel-top"><h2>Test results</h2><span class="tag" id="test-summary">Ready</span></div><div id="test-content" class="pad"><p class="muted">Select a submission and run its simulated tests.</p></div></section>
+      </div>
+    </section>
+
+    <section class="page" id="review" aria-labelledby="title-review" hidden>
+      <div class="head"><div><h1 id="title-review">Feedback review</h1><p class="muted"><span data-assignment>First positive value</span> · <span id="review-version">S-014A</span></p></div><a class="button primary" href="#evaluation">Open evaluation</a></div>
+      <div class="split equal">
+        <section class="panel"><div class="panel-top"><h2>AI draft</h2><span class="tag" id="comment-count">2 comments</span></div><div class="comments" id="comments"></div></section>
+        <section class="panel"><div class="panel-top"><h2>Cited evidence</h2><span class="tag" id="evidence-status"></span></div><div id="evidence" class="pad"></div></section>
+      </div>
+    </section>
+
+    <section class="page" id="evaluation" aria-labelledby="title-evaluation" hidden>
+      <div class="head"><div><h1 id="title-evaluation">Evaluation setup</h1><p class="muted">Compare two feedback workflows on the same submission pairs.</p></div><button class="primary" id="run-evaluation">Run sample evaluation</button></div>
+      <div class="split equal">
+        <section class="panel"><div class="panel-top"><h2>Conditions</h2></div><div class="pad field">
+          <div><h3>A · Direct feedback</h3><p class="muted">Generate feedback from the task, rubric, submission, and test results.</p></div>
+          <div><h3>B · Feedback with reference checks</h3><p class="muted">Use the same inputs, then require evidence references and check them before review.</p></div>
+        </div></section>
+        <section class="panel"><div class="panel-top"><h2>Shared configuration</h2></div><div class="pad fields">
+          <label>Dataset<input value="Synthetic Python pairs · 12 cases" readonly></label>
+          <label>Model<input value="Same model in A and B" readonly></label>
+          <label class="wide">Rubric and scoring key<input value="PY-01 rubric v1 · independently annotated cases" readonly></label>
+        </div></section>
+        <section class="panel pad"><h2>Measures</h2><p class="muted">Unsupported comments, known errors missed, and appropriate feedback changes after a targeted correction.</p></section>
+      </div>
+    </section>
+
+    <section class="page" id="results" aria-labelledby="title-results" hidden>
+      <div class="head"><div><h1 id="title-results">Evaluation results</h1><p class="muted">Run SIM-001 · 12 paired cases · illustrative values</p></div><button class="primary" id="export-results">Export sample CSV</button></div>
+      <div class="metric-grid">
+        <div class="metric"><span class="small">Unsupported comments</span><strong>8 → 3</strong><span class="small">A → B · out of comments shown below</span></div>
+        <div class="metric"><span class="small">Known errors missed</span><strong>4 → 3</strong><span class="small">A → B · out of 18 annotated errors</span></div>
+        <div class="metric"><span class="small">Appropriate feedback changes</span><strong>7 → 10</strong><span class="small">A → B · out of 12 pairs</span></div>
+      </div>
+      <div class="panel end"><div class="panel-top"><h2>By condition</h2><a href="#evaluation" class="small">View setup</a></div><div class="table-wrap"><table>
+        <thead><tr><th>Condition</th><th>Unsupported / comments</th><th>Missed / known errors</th><th>Feedback changes / pairs</th></tr></thead>
+        <tbody><tr><td>A · Direct</td><td>8 / 32</td><td>4 / 18</td><td>7 / 12</td></tr><tr><td>B · Reference checks</td><td>3 / 31</td><td>3 / 18</td><td>10 / 12</td></tr></tbody>
+      </table></div></div>
+      <div class="panel pad end"><h2>Inspect case P-014</h2><p class="muted">Review the comment on the starting index against the first-element test and the original code.</p><button id="inspect-case">Review case P-014</button></div>
+    </section>
+    <div class="footnote">Clickable wireframe. Test outcomes, feedback, and metrics are simulated.</div>
+  </main>
+</div>
+</div>
+<dialog id="edit-dialog"><form method="dialog" id="edit-comment-form"><h2>Edit comment</h2><label>Feedback text<textarea id="edit-text" required></textarea></label><div class="actions end"><button type="button" id="cancel-edit">Cancel</button><button class="primary">Save edit</button></div></form></dialog>
+<script>
+const $ = (id) => document.getElementById(id);
+const pages = {
+  assignments:['Assignments','assignments'],
+  setup:['Assignments / Configure','assignments'],
+  submissions:['Submissions / Case P-014','submissions'],
+  review:['Feedback review / Case P-014','review'],
+  evaluation:['Evaluation / Setup','evaluation'],
+  results:['Evaluation / Results','evaluation']
+};
+let version = 'original';
+let activeComment = 0;
+let testsShown = false;
+const notes = {
+  original:[
+    {title:'Checks start at index 1', body:'Start the loop at index 0 so it can return the first element when that element is positive.', rubric:'R1 · Iteration', line:2, test:'T01', claim:'Fails', status:'Pending'},
+    {title:'Empty lists cause an exception', body:'Handle the empty input before entering the loop.', rubric:'R2 · Edge cases', line:2, test:'T03', claim:'Fails', status:'Pending'}
+  ],
+  corrected:[
+    {title:'Checks the first element', body:'The loop now checks index 0, and the first-element test passes.', rubric:'R1 · Iteration', line:2, test:'T01', claim:'Passes', status:'Pending'},
+    {title:'Returns None for an empty list', body:'Keep the final return so the function handles empty input.', rubric:'R2 · Edge cases', line:5, test:'T03', claim:'Passes', status:'Pending'}
+  ]
+};
+function codeMarkup(highlight){
+  const first = version === 'original' ? 1 : 0;
+  const lines = ['def first_positive(values):','    for i in range(' + first + ', len(values)):','        if values[i] > 0:','            return values[i]','    return None'];
+  return lines.map((line,index)=>'<div class="line'+(highlight === index+1 ? ' hot' : '')+'"><em>'+(index+1)+'</em>'+line.replaceAll('>','&gt;')+'</div>').join('');
+}
+function testActual(test){
+  if(test === 'T01'){return version === 'original' ? 'None' : '4';}
+  return test === 'T02' ? '7' : 'None';
+}
+const testExpected = {T01:'4',T02:'7',T03:'None'};
+function showStatus(message){$('status').textContent=message;}
+function renderSubmission(){
+  $('submission-code').innerHTML = codeMarkup(2);
+  $('submission-note').textContent = version === 'original' ? 'Original: the loop starts at index 1.' : 'Corrected: the loop starts at index 0.';
+  document.querySelectorAll('[data-version]').forEach(btn=>{
+    const selected = btn.dataset.version === version;
+    btn.setAttribute('aria-pressed',String(selected));
+    btn.classList.toggle('primary',selected);
+  });
+  if(!testsShown){
+    $('test-summary').textContent='Ready';
+    $('test-content').innerHTML='<p class="muted">Select a submission and run its simulated tests.</p>';
+    return;
+  }
+  $('test-summary').textContent=(version === 'original' ? '2' : '3')+' / 3 passed';
+  $('test-content').innerHTML='<div class="table-wrap"><table><thead><tr><th>Test</th><th>Expected</th><th>Actual</th><th>Status</th></tr></thead><tbody>'+
+    Object.entries(testExpected).map(([key,expected])=>{
+      const actual=testActual(key), pass=actual===expected;
+      return '<tr><td>'+key+'</td><td><code>'+expected+'</code></td><td><code>'+actual+'</code></td><td><span class="tag '+(pass?'ok':'bad')+'">'+(pass?'Pass':'Fail')+'</span></td></tr>';
+    }).join('')+'</tbody></table></div><div class="end"><a class="button primary" href="#review">Preview AI feedback</a></div>';
+}
+function isConflict(note){
+  const actual = testActual(note.test)===testExpected[note.test] ? 'Passes' : 'Fails';
+  return actual!==note.claim;
+}
+function renderReview(){
+  $('review-version').textContent=version==='original'?'S-014A · Original':'S-014B · Corrected';
+  $('comments').replaceChildren();
+  notes[version].forEach((note,i)=>{
+    const article = document.createElement('article');
+    article.classList.toggle('active',i===activeComment);
+    article.innerHTML='<div class="comment-title"><h3><button data-comment="'+i+'" aria-pressed="'+(i===activeComment)+'"></button></h3><span class="tag '+(isConflict(note)?'warn':'ok')+'"></span></div><p class="comment-body"></p><div class="actions"><span class="tag decision"></span><button data-action="Accepted" data-index="'+i+'">Accept</button><button data-action="Edit" data-index="'+i+'">Edit</button><button data-action="Rejected" data-index="'+i+'">Reject</button></div>';
+    article.querySelector('h3 button').textContent=note.title;
+    article.querySelector('.comment-title .tag').textContent=isConflict(note)?'Evidence conflict':'References found';
+    article.querySelector('.comment-body').textContent=note.body;
+    article.querySelector('.decision').textContent=note.status;
+    $('comments').append(article);
+  });
+  const note=notes[version][activeComment], conflict=isConflict(note);
+  $('evidence-status').textContent=conflict?'Evidence conflict':'References found';
+  $('evidence-status').className='tag '+(conflict?'warn':'ok');
+  $('evidence').innerHTML='<div class="stack"><div><h3>Rubric criterion</h3><p class="muted">'+note.rubric+'</p></div><div><h3>Source code · line '+note.line+'</h3><div class="code">'+codeMarkup(note.line)+'</div></div><div><h3>Test '+note.test+'</h3><p class="muted">Expected <code>'+testExpected[note.test]+'</code> · actual <code>'+testActual(note.test)+'</code></p></div>'+
+    (conflict?'<div class="callout">The draft says this test failed. The recorded test passed.</div>':'<p class="small">The cited references exist. Review whether they support the comment.</p>')+'</div>';
+}
+function route(){
+  let key=location.hash.slice(1);
+  if(!Object.hasOwn(pages,key)){key='assignments';}
+  document.querySelectorAll('.page').forEach(page=>{page.hidden=page.id!==key;});
+  document.querySelectorAll('[data-nav]').forEach(link=>{
+    if(link.dataset.nav===pages[key][1]){link.setAttribute('aria-current','page');}
+    else{link.removeAttribute('aria-current');}
+  });
+  $('breadcrumb').textContent=pages[key][0];
+  showStatus('');
+  if(key==='submissions'){renderSubmission();}
+  if(key==='review'){renderReview();}
+  window.scrollTo(0,0);
+}
+window.addEventListener('hashchange',route);
+document.querySelectorAll('[data-version]').forEach(button=>button.addEventListener('click',()=>{
+  version=button.dataset.version; testsShown=false; activeComment=0; renderSubmission();
+}));
+$('show-tests').addEventListener('click',()=>{testsShown=true;renderSubmission();});
+$('assignment-form').addEventListener('submit',event=>{
+  event.preventDefault();
+  document.querySelectorAll('[data-assignment]').forEach(node=>{node.textContent=$('assignment-name').value;});
+  showStatus('Assignment title updated for this session.');
+});
+let editIndex=0;
+$('comments').addEventListener('click',event=>{
+  const button=event.target.closest('button');
+  if(!button){return;}
+  if(button.hasAttribute('data-comment')){activeComment=Number(button.dataset.comment);renderReview();document.querySelector('[data-comment="'+activeComment+'"]').focus();return;}
+  const index=Number(button.dataset.index), action=button.dataset.action;
+  activeComment=index;
+  if(action==='Edit'){
+    editIndex=index; $('edit-text').value=notes[version][index].body; $('edit-dialog').showModal();return;
+  }
+  notes[version][index].status=action;
+  renderReview();
+  document.querySelector('[data-action="'+action+'"][data-index="'+index+'"]').focus();
+  showStatus('Comment marked '+action.toLowerCase()+'.');
+});
+$('cancel-edit').addEventListener('click',()=>$('edit-dialog').close());
+$('edit-comment-form').addEventListener('submit',()=>{
+  notes[version][editIndex].body=$('edit-text').value;
+  notes[version][editIndex].status='Edited';
+  renderReview();showStatus('Comment edited for this session.');
+});
+$('run-evaluation').addEventListener('click',()=>{location.hash='results';});
+$('inspect-case').addEventListener('click',()=>{version='original';activeComment=0;testsShown=false;location.hash='review';});
+$('export-results').addEventListener('click',()=>{
+  const csv='run,condition,unsupported,total_comments,missed,total_errors,appropriate_changes,total_pairs\nSIM-001,A,8,32,4,18,7,12\nSIM-001,B,3,31,3,18,10,12\n';
+  const url=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+  const link=document.createElement('a');link.href=url;link.download='feedback-lab-sample.csv';link.click();
+  setTimeout(()=>URL.revokeObjectURL(url),300);
+});
+route();
+</script>
+</body>
+</html>
