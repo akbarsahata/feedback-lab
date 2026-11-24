@@ -1,0 +1,28 @@
+{
+  "name": "feedback-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate:local": "wrangler d1 migrations apply feedback-lab --local",
+    "db:migrate:remote": "wrangler d1 migrations apply feedback-lab --remote",
+    "provision": "node scripts/provision-user.mjs",
+    "cf-typegen": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.9.2",
+    "@cloudflare/workers-types": "^5.20261124.2",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^5.1.1",
+    "wrangler": "^4.168.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}
