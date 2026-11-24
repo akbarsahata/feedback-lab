@@ -1,5 +1,1 @@
-export default {
-  fetch(): Response {
-    return new Response('Feedback Lab');
-  },
-};
+export { default } from './app';
