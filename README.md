@@ -33,7 +33,7 @@ npm run dev
 
 Open <http://localhost:8787>, sign in with the printed password, and use the assignment library.
 
-The local database lives under `.wrangler/` (ignored by git). `database_id` in `wrangler.jsonc` is a placeholder because local development does not use it. Replace it with the real D1 ID before the first remote deployment.
+The local database lives under `.wrangler/` (ignored by git). The remote binding resolves the `feedback-lab` database by name in the selected Cloudflare account.
 
 ### Commands
 
@@ -45,7 +45,7 @@ The local database lives under `.wrangler/` (ignored by git). `database_id` in `
 | `npm run db:migrate:local` | Apply D1 migrations locally. |
 | `npm run db:migrate:remote` | Apply D1 migrations to the deployed database. |
 | `npm run provision -- ...` | Create a user directly in D1. |
-| `npm run deploy` | Deploy the Worker (not run for this issue). |
+| `npm run deploy` | Deploy the Worker to its configured custom domain. |
 
 ## Authentication and roles
 
@@ -177,13 +177,13 @@ For create and revise, send the test arguments and expected return as **JSON tex
 
 `arguments` and `expectedReturn` are JSON values emitted with the original numeric kind preserved on the wire. Some clients (including ordinary JavaScript JSON parsing) lose that distinction. For #2, **`argumentsJson` and `expectedReturnJson` are authoritative**: use lossless decoding of those strings, and use `entryPoint` as the canonical NFKC function name. A real run should pin the assignment, rubric, and test-suite version IDs it read and never resolve "latest" at result time.
 
-## Deployment (not performed for this issue)
+## Deployment
 
-No deployment or hosted verification was performed in the issue #1 implementation or review-fixes worktree.
+Production uses the `feedback-lab` Worker and D1 database at <https://python-assessor.akbarsahata.id>. Cloudflare manages DNS and TLS through the Worker Custom Domain. The `workers.dev` hostname and preview URLs are disabled.
 
-Maintainer steps:
+For an initial deployment, authenticate Wrangler and select the Cloudflare account that owns `akbarsahata.id`. Then:
 
-1. `npx wrangler d1 create feedback-lab` and place the returned ID in `wrangler.jsonc`.
+1. If the database does not already exist, run `npx wrangler d1 create feedback-lab`.
 2. `npm run db:migrate:remote`.
 3. Provision two researchers and one member:
    ```sh
@@ -201,9 +201,9 @@ Maintainer steps:
 - `npm run dev` starts against local D1 under Node 22.14.
 - The `first_positive` create, reopen, metadata revision, and history flow was exercised manually with `curl` against the local Worker.
 - Local headless Chrome exercised sign-in, repeated editor row add/remove, multiline JSON, save, reopen, and an unchanged resubmit.
-- Local Workers-runtime tests verify that anonymous sign-in is throttled without replacing or blocking an existing session. The hosted checks below remain unexecuted.
+- Local Workers-runtime tests verify that anonymous sign-in is throttled without replacing or blocking an existing session.
 
-### Hosted verification checklist (remaining)
+### Hosted verification checklist
 
 - [ ] Both researchers can sign in; each can open and revise the same assignment.
 - [ ] The member can sign in but is denied `/assignments`, create/edit, history, exact-version, and API routes through the UI and direct requests.
@@ -223,7 +223,6 @@ Maintainer steps:
 - `@cloudflare/workers-types` is a dev dependency for editor/type-check support. It is not a runtime dependency.
 - Stored JSON is canonical (`[[4,-1]]`); the edit form and detail view add spacing for display (`[[4, -1]]`) without changing values or numeric kinds. The edit form uses multiline JSON inputs so pasted formatting is kept on validation and conflict responses.
 - Tests use a small cleanup helper between cases because the installed Workers Vitest plugin did not isolate D1 storage between tests automatically. Production migrations never seed data.
-- No hosted checks have been run; see the checklist above.
 
 ## Project layout
 

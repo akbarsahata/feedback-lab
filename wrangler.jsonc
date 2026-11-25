@@ -3,8 +3,15 @@
   "name": "feedback-lab",
   "main": "src/app.ts",
   "compatibility_date": "2026-11-20",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "python-assessor.akbarsahata.id", "custom_domain": true }
+  ],
   "observability": {
-    "enabled": true
+    "enabled": true,
+    "redact_query_string": true,
+    "traces": { "enabled": true }
   },
   "ratelimits": [
     {
@@ -17,9 +24,6 @@
     {
       "binding": "DB",
       "database_name": "feedback-lab",
-      // Replace with the ID returned by `npx wrangler d1 create feedback-lab`
-      // before deploying. Local development ignores this value.
-      "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
   ]
