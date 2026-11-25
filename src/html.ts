@@ -152,7 +152,6 @@ export interface MessagePageOptions {
   title: string;
   message: string;
   user?: SessionUser;
-  status?: 'info' | 'warn';
 }
 
 export function messagePage({ title, message, user }: MessagePageOptions): string {
@@ -173,8 +172,4 @@ export function messagePage({ title, message, user }: MessagePageOptions): strin
   }
 
   return shell({ title, user, body, activeNav: 'assignments' });
-}
-
-export function notice(kind: 'ok' | 'error' | 'warn', text: string): string {
-  return `<div class="alert alert-${kind}" role="${kind === 'error' ? 'alert' : 'status'}">${escapeHtml(text)}</div>`;
 }

@@ -15,6 +15,10 @@ import { htmlResponse, jsonResponse, methodNotAllowed, redirect } from './http';
 import { verifyPassword } from './password';
 
 const GENERIC_SIGN_IN_ERROR = 'Email or password is incorrect.';
+// A syntactically valid hash used to spend the same PBKDF2 work when the email
+// does not exist, so sign-in timing does not reveal registered accounts.
+const DUMMY_PASSWORD_HASH =
+  'pbkdf2-sha256$100000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -93,8 +97,10 @@ async function signIn(request: Request, env: Env): Promise<Response> {
     .bind(email)
     .first<{ id: string; email: string; password_hash: string; role: 'researcher' | 'member' }>();
 
-  const passwordMatches =
-    user !== null && (await verifyPassword(password, user.password_hash));
+  const passwordMatches = await verifyPassword(
+    password,
+    user?.password_hash ?? DUMMY_PASSWORD_HASH,
+  );
   if (user === null || !passwordMatches) {
     return htmlResponse(
       signInPage({ error: GENERIC_SIGN_IN_ERROR, email, next }),

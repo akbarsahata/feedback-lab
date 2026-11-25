@@ -54,7 +54,7 @@ CREATE TABLE tests (
   test_id TEXT NOT NULL,
   arguments_json TEXT NOT NULL,
   expected_return_json TEXT NOT NULL,
-  comparison_rule TEXT NOT NULL,
+  comparison_rule TEXT NOT NULL CHECK (comparison_rule = 'function-value-v1'),
   PRIMARY KEY (test_suite_version_id, position),
   UNIQUE (test_suite_version_id, test_id)
 );

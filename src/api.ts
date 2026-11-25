@@ -23,7 +23,6 @@ import {
   reviseAssignment,
   StaleVersionError,
   type AssignmentVersionDetail,
-  type AssignmentVersionSummary,
 } from './repository';
 
 class InvalidRequestError extends Error {}
@@ -323,18 +322,5 @@ export function serializeVersion(version: AssignmentVersionDetail): Record<strin
     },
     createdAt: version.createdAt,
     createdBy: version.createdBy,
-  };
-}
-
-export function serializeVersionSummary(
-  version: AssignmentVersionSummary,
-): Record<string, unknown> {
-  return {
-    id: version.id,
-    versionNumber: version.versionNumber,
-    title: version.title,
-    createdAt: version.createdAt,
-    createdBy: version.createdBy,
-    isActive: version.isActive,
   };
 }

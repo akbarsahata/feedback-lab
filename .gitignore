@@ -1,7 +1,38 @@
-node_modules/
-.wrangler/
+# Operating system files
+.DS_Store
+
+# Local planning notes and temporary research material
+.scratch/
+/tmp/
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
 .dev.vars
+.dev.vars.*
+!.dev.vars.example
+!.dev.vars.*.example
+
+# JavaScript dependencies, build output, and coverage
+node_modules/
 dist/
+build/
 coverage/
 *.log
-.DS_Store
+
+# Python environments, caches, and coverage
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Cloudflare local state
+.wrangler/
