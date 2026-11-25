@@ -385,6 +385,52 @@ describe('versioning table', () => {
     expect(original.body.version.testSuite.tests[1].expectedReturn).toBeNull();
   });
 
+  it('allows the same ID in each list and treats a criterion ID rename as a new item', async () => {
+    const researcher = await signIn(await seedUser());
+    const config = assignmentConfig({
+      criteria: [
+        {
+          id: 'list-argument',
+          description: 'Iteration order',
+          expectedBehavior: 'Checks each item in order.',
+        },
+        { id: 'r2', description: 'No positive value', expectedBehavior: 'Returns None.' },
+      ],
+    });
+    const created = await createAssignment(researcher, config);
+    const assignmentId = created.version.assignmentId;
+
+    expect(created.version.rubric.criteria.map((criterion) => criterion.id)).toEqual([
+      'list-argument',
+      'r2',
+    ]);
+    expect(created.version.testSuite.tests.map((test) => test.id)).toContain('list-argument');
+
+    const renamed = versionToRawConfig(created.version);
+    renamed.criteria = renamed.criteria.map((criterion) =>
+      criterion.id === 'list-argument'
+        ? { ...criterion, id: 'list-argument-v2' }
+        : criterion,
+    );
+    const next = await saveRevisionRaw(researcher, assignmentId, created.version, renamed);
+
+    expect(next.versionNumber).toBe(2);
+    expect(next.rubricVersionId).not.toBe(created.version.rubricVersionId);
+    expect(next.rubric.criteria.map((criterion) => criterion.id)).toEqual([
+      'list-argument-v2',
+      'r2',
+    ]);
+
+    const original = await apiJson(
+      `/api/assignments/${assignmentId}/versions/${created.version.id}`,
+      { session: researcher },
+    );
+    expect(original.body.version.rubric.criteria.map((criterion: { id: string }) => criterion.id)).toEqual([
+      'list-argument',
+      'r2',
+    ]);
+  });
+
   it('does not advance the active version when validation fails', async () => {
     const researcher = await signIn(await seedUser());
     const created = await createAssignment(researcher);

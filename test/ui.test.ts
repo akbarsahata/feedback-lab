@@ -382,9 +382,6 @@ describe('edit and history', () => {
     expect(html).not.toContain('action="/assignments/' + version.assignmentId + '"');
     expect(html).not.toContain('>Edit assignment<');
     expect(html).not.toContain('Later title');
-
-    const active = await (await get(`${base}/versions/${version.id}`, researcher)).text();
-    void active;
   });
 
   it('shows the active version as active and offers an edit action', async () => {
