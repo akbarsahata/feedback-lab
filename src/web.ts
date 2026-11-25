@@ -3,6 +3,7 @@ import {
   type SessionUser,
 } from './auth';
 import { validateConfig, type RawConfig } from './config';
+import { dispatchRun } from './dispatch';
 import { parseAssignmentForm } from './forms';
 import { formatJsonForDisplay, parseJsonValue } from './json';
 import { requireResearcher } from './guard';
@@ -25,11 +26,18 @@ import {
   StaleVersionError,
   type AssignmentVersionDetail,
 } from './repository';
+import {
+  createSubmissionRun,
+  listRunsForVersion,
+  StaleLaunchError,
+} from './runs';
+import { readSourceUpload, sha256Hex, UploadError } from './upload';
 
 const ASSIGNMENT_PATH = /^\/assignments\/([^/]+)$/;
 const EDIT_PATH = /^\/assignments\/([^/]+)\/edit$/;
 const HISTORY_PATH = /^\/assignments\/([^/]+)\/history$/;
 const VERSION_PATH = /^\/assignments\/([^/]+)\/versions\/([^/]+)$/;
+const RUNS_PATH = /^\/assignments\/([^/]+)\/runs$/;
 
 export async function handleAssignmentsHtml(
   request: Request,
@@ -97,7 +105,16 @@ async function routeAssignmentsHtml(
       user: session,
       version,
       isActive: version.id === active.id,
+      runs: await listRunsForVersion(env.DB, version.id),
     }));
+  }
+
+  const runsMatch = RUNS_PATH.exec(path);
+  if (runsMatch !== null) {
+    if (request.method !== 'POST') {
+      return methodNotAllowed('POST');
+    }
+    return launchRun(request, env, session, runsMatch[1] as string);
   }
 
   const editMatch = EDIT_PATH.exec(path);
@@ -145,7 +162,13 @@ async function routeAssignmentsHtml(
         new URL(request.url).searchParams.get('notice') === 'unchanged'
           ? 'No changes to save; the active version is unchanged.'
           : undefined;
-      return htmlResponse(assignmentDetailPage({ user: session, version: active, notice }));
+      return htmlResponse(assignmentDetailPage({
+        user: session,
+        version: active,
+        notice,
+        canLaunch: true,
+        runs: await listRunsForVersion(env.DB, active.id),
+      }));
     }
     if (request.method === 'POST') {
       return reviseAssignmentForm(request, env, session, assignmentId);
@@ -154,6 +177,82 @@ async function routeAssignmentsHtml(
   }
 
   return notFoundPage(session);
+}
+
+async function launchRun(
+  request: Request,
+  env: Env,
+  session: SessionUser,
+  assignmentId: string,
+): Promise<Response> {
+  let upload;
+  try {
+    upload = await readSourceUpload(request);
+  } catch (error) {
+    if (!(error instanceof UploadError)) throw error;
+    return uploadErrorPage(env, session, assignmentId, error.message, error.status);
+  }
+
+  if (authenticatedPostError(request, session, upload.csrfToken) !== null) {
+    return blockedPage(session);
+  }
+
+  const active = await getActiveVersion(env.DB, assignmentId);
+  if (upload.versionId !== active.id) {
+    return uploadErrorPage(
+      env,
+      session,
+      assignmentId,
+      'A newer assignment version is active. Reopen the active version and upload the file again.',
+      409,
+    );
+  }
+
+  let created;
+  try {
+    created = await createSubmissionRun(env.DB, {
+      assignmentId,
+      assignmentVersionId: active.id,
+      source: upload.bytes,
+      sourceSha256: await sha256Hex(upload.bytes),
+      userId: session.id,
+      now: new Date().toISOString(),
+    });
+  } catch (error) {
+    if (error instanceof StaleLaunchError) {
+      return uploadErrorPage(
+        env,
+        session,
+        assignmentId,
+        'A newer assignment version became active before this run started. Reopen the active version and try again.',
+        409,
+      );
+    }
+    throw error;
+  }
+
+  await dispatchRun(env, created.runId);
+  return redirect(`/runs/${created.runId}`);
+}
+
+async function uploadErrorPage(
+  env: Env,
+  session: SessionUser,
+  assignmentId: string,
+  message: string,
+  status: number,
+): Promise<Response> {
+  const active = await getActiveVersion(env.DB, assignmentId);
+  return htmlResponse(
+    assignmentDetailPage({
+      user: session,
+      version: active,
+      canLaunch: true,
+      runs: await listRunsForVersion(env.DB, active.id),
+      uploadError: message,
+    }),
+    status,
+  );
 }
 
 async function createAssignmentForm(

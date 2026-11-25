@@ -8,6 +8,8 @@ import type {
   AssignmentVersionDetail,
   AssignmentVersionSummary,
 } from './repository';
+import { MAX_SOURCE_BYTES, type RunSummary } from './runs';
+import { runStatusClass, runStatusLabel } from './run-format';
 
 export function libraryPage(user: SessionUser, assignments: AssignmentSummary[]): string {
   const body = `<div class="head">
@@ -234,6 +236,9 @@ export interface AssignmentDetailPageOptions {
   version: AssignmentVersionDetail;
   notice?: string;
   isActive?: boolean;
+  canLaunch?: boolean;
+  runs?: RunSummary[];
+  uploadError?: string;
 }
 
 export function assignmentDetailPage({
@@ -241,6 +246,9 @@ export function assignmentDetailPage({
   version,
   notice,
   isActive = true,
+  canLaunch = false,
+  runs = [],
+  uploadError,
 }: AssignmentDetailPageOptions): string {
   const base = escapeHtml(`/assignments/${version.assignmentId}`);
   const body = `<div class="head">
@@ -255,7 +263,10 @@ export function assignmentDetailPage({
   </div>
 </div>
 ${notice === undefined ? '' : `<div class="alert alert-ok" role="status">${escapeHtml(notice)}</div>`}
+${uploadError === undefined ? '' : `<div class="alert alert-error" role="alert">${escapeHtml(uploadError)}</div>`}
 ${isActive ? '<div class="banner ok"><span>This is the active version.</span><a href="' + base + '/history">View saved versions</a></div>' : '<div class="banner"><span>This is a read-only historical version. It is not the active version.</span><a href="' + base + '">Open the active version</a></div>'}
+${isActive && canLaunch ? uploadPanel(base, version, user) : ''}
+${runHistory(version.assignmentId, runs)}
 <div class="meta-grid end">
   <div class="metric"><span class="small">Rubric</span><strong>${plural(version.criteria.length, 'criterion', 'criteria')}</strong><span class="small mono">${escapeHtml(version.rubricVersionId)}</span></div>
   <div class="metric"><span class="small">Tests</span><strong>${plural(version.tests.length, 'test')}</strong><span class="small mono">${escapeHtml(version.testSuiteVersionId)}</span></div>
@@ -314,6 +325,47 @@ ${isActive ? '<div class="banner ok"><span>This is the active version.</span><a 
     user,
     body,
   });
+}
+
+function uploadPanel(
+  base: string,
+  version: AssignmentVersionDetail,
+  user: SessionUser,
+): string {
+  return `<section class="panel pad end" aria-label="Run tests">
+  <h2>Run tests</h2>
+  <p class="muted small">Upload one synthetic Python file. Each test runs in a fresh isolated native Python execution. Results stay pinned to version ${version.versionNumber} and its exact test suite, even after you edit the assignment.</p>
+  <form method="post" action="${base}/runs" enctype="multipart/form-data" class="actions">
+    <input type="hidden" name="_csrf" value="${escapeHtml(user.csrfToken)}">
+    <input type="hidden" name="versionId" value="${escapeHtml(version.id)}">
+    <label class="wide">Python source file
+      <input type="file" name="source" accept=".py,text/x-python" required>
+      <span class="hint">One UTF-8 <code>.py</code> file, at most ${MAX_SOURCE_BYTES / 1024} KiB.</span>
+    </label>
+    <button class="primary" type="submit">Run tests</button>
+  </form>
+</section>`;
+}
+
+function runHistory(assignmentId: string, runs: RunSummary[]): string {
+  if (runs.length === 0) return '';
+  const rows = runs
+    .map(
+      (run) => `<tr>
+  <td><a href="/runs/${escapeHtml(run.id)}">Test run ${escapeHtml(shortId(run.id))}</a></td>
+  <td><span class="tag ${runStatusClass(run.status)}">${runStatusLabel(run.status)}</span></td>
+  <td>${run.passedCount} / ${run.testCount} passed</td>
+  <td class="compact small">${escapeHtml(formatTimestamp(run.queuedAt))}</td>
+</tr>`,
+    )
+    .join('');
+  return `<section class="panel end">
+  <div class="panel-top"><h2>Recent runs</h2><a class="small" href="/assignments/${escapeHtml(assignmentId)}">Refresh</a></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Run</th><th>Status</th><th>Tests</th><th>Queued</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>
+</section>`;
 }
 
 export function historyPage(

@@ -1,10 +1,12 @@
 # Feedback Lab
 
-Feedback Lab is the research platform for inspecting AI feedback on introductory Python assignments. This repository currently implements issue #1: **versioned function assignment configuration**.
+Feedback Lab is the research platform for inspecting AI feedback on introductory Python assignments. The repository implements issue #1's **versioned function assignment configuration** and issue #2's **isolated function test runs**.
 
 A pre-approved researcher can sign in, create a Python function assignment with an ordered rubric and ordered tests, revise it, and open any saved configuration read-only. Every save that changes content creates immutable versions. A save based on an older active version is rejected instead of overwriting a newer one.
 
-Submissions, Python execution, return comparison during a run, script assignments, seeded library data, drafts, restore/branching, and automatic merging are intentionally out of scope.
+A researcher can also upload one synthetic UTF-8 Python file, launch the assignment's tests, and reopen line-numbered source and per-test evidence. A **Test run** pins the submission, assignment, rubric, test suite, Python release, runner artifact, and limits. Later edits do not change saved results.
+
+Script assignments, paired datasets, feedback generation, same-run study resume, aggregate reporting, seeded library data, drafts, restore/branching, and automatic merging are intentionally out of scope.
 
 ## Stack
 
@@ -40,6 +42,7 @@ The local database lives under `.wrangler/` (ignored by git). The remote binding
 | Command | Purpose |
 | --- | --- |
 | `npm test` | Run all unit and integration tests in the Workers runtime. |
+| `python3 -m unittest discover -s runner -p 'test_*.py' -v` | Run the native Python runner contract tests. |
 | `npm run typecheck` | Type-check application, tests, and config. |
 | `npm run dev` | Start the local Worker and D1. |
 | `npm run db:migrate:local` | Apply D1 migrations locally. |
@@ -118,6 +121,9 @@ HTML:
 | `GET /assignments/:id/edit`, `POST /assignments/:id` | Revise from the active version. Detail-page Edit links pin the version that was viewed; if it has changed, explicitly reopen the active version. POST requires the original `baseVersionId`. |
 | `GET /assignments/:id/history` | Saved versions, newest first. |
 | `GET /assignments/:id/versions/:versionId` | Exact version, read-only. |
+| `POST /assignments/:id/runs` | Upload one UTF-8 `.py` file (64 KiB maximum) and launch a run against the active version. Stale version IDs return 409. |
+| `GET /runs/:id` | Version-pinned run summary and line-numbered submitted source. |
+| `GET /runs/:id/tests/:testId` | Recorded expected and actual values, separate stdout/stderr, diagnostics, and timings for one test. |
 
 JSON API (researcher role required except `/api/session`; writes require `X-CSRF-Token` and a matching `Origin` when present):
 
@@ -135,7 +141,7 @@ Revise responses: `201` with `changed: true` for a new version, `200` with `chan
 
 For create and revise, send the test arguments and expected return as **JSON text strings** in `arguments` and `expectedReturn` (for example, `"arguments": "[1.0]"`). The `argumentsJson` and `expectedReturnJson` string fields take precedence when present, so test rows from a read response can be posted back unchanged. Do not submit only decoded values: a caller's own JSON parser may already have erased the integer/float distinction, and it cannot report duplicate keys after parsing them.
 
-### What issue #2 consumes
+### Configuration handoff
 
 `GET /api/assignments/:id/versions/:versionId` returns the exact immutable configuration, for example:
 
@@ -175,7 +181,17 @@ For create and revise, send the test arguments and expected return as **JSON tex
 }
 ```
 
-`arguments` and `expectedReturn` are JSON values emitted with the original numeric kind preserved on the wire. Some clients (including ordinary JavaScript JSON parsing) lose that distinction. For #2, **`argumentsJson` and `expectedReturnJson` are authoritative**: use lossless decoding of those strings, and use `entryPoint` as the canonical NFKC function name. A real run should pin the assignment, rubric, and test-suite version IDs it read and never resolve "latest" at result time.
+`arguments` and `expectedReturn` are JSON values emitted with the original numeric kind preserved on the wire. Some clients (including ordinary JavaScript JSON parsing) lose that distinction. **`argumentsJson` and `expectedReturnJson` are authoritative**: use lossless decoding of those strings, and use `entryPoint` as the canonical NFKC function name. A run pins the assignment, rubric, and test-suite version IDs it read and never resolves "latest" at result time.
+
+## Test runs
+
+Each test runs in a fresh native Python execution with standard library only. The initial limits are **2 seconds wall-clock execution, 128 MiB memory, and 16 KiB combined standard output and standard error**. The Worker records each test's status before and after the runner call, so an interruption leaves completed results intact and classifies a started-but-unfinished test as **Infrastructure failure** and an unstarted test as **Not run**.
+
+`function-value-v1` compares exact numbers without tolerance (`7` matches `7.0`), strict booleans (`True` differs from `1`), exact strings, `None` only with `null`, ordered lists, and dictionaries by key recursively. The actual value is tagged by the trusted runner so Python integer and float kinds never pass through JavaScript `Number`.
+
+The native runner lives in [`runner/`](runner/README.md), and its private Container Worker adapter lives in [`runner-worker/`](runner-worker). The Worker publishes committed runs through `feedback-lab-test-runs`; the queue consumer calls the private `RUNNER` service binding. Each **Test run** gets its own container instance, so state from one run cannot affect another. Within a run, each test still executes in a fresh Python child process.
+
+The deployed runner uses the `basic` instance (0.25 vCPU, 1024 MiB), Python `3.12.11`, `enableInternet: false`, and the per-test limits above. The hosted verification record is in [`docs/verification/issue-2-hosted-runner.md`](docs/verification/issue-2-hosted-runner.md). Local tests use a fake runner and the Python contract tests; the hosted record is the evidence for the deployed boundary.
 
 ## Deployment
 
@@ -184,15 +200,17 @@ Production uses the `feedback-lab` Worker and D1 database at <https://python-ass
 For an initial deployment, authenticate Wrangler and select the Cloudflare account that owns `akbarsahata.id`. Then:
 
 1. If the database does not already exist, run `npx wrangler d1 create feedback-lab`.
-2. `npm run db:migrate:remote`.
-3. Provision two researchers and one member:
+2. Create the test-run queue once: `npx wrangler queues create feedback-lab-test-runs`.
+3. `npm run db:migrate:remote`.
+4. Provision two researchers and one member:
    ```sh
    npm run provision -- --email researcher-a@example.edu --role researcher
    npm run provision -- --email researcher-b@example.edu --role researcher
    npm run provision -- --email member@example.edu --role member
    ```
-4. `npm run deploy`.
-5. Complete the hosted checklist below.
+5. Deploy the private runner Worker: `npx wrangler deploy -c runner-worker/wrangler.jsonc`.
+6. `npm run deploy`.
+7. Complete the hosted checklist below.
 
 ### Local verification performed
 
@@ -202,6 +220,8 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
 - The `first_positive` create, reopen, metadata revision, and history flow was exercised manually with `curl` against the local Worker.
 - Local headless Chrome exercised sign-in, repeated editor row add/remove, multiline JSON, save, reopen, and an unchanged resubmit.
 - Local Workers-runtime tests verify that anonymous sign-in is throttled without replacing or blocking an existing session.
+- `npm test` also covers `function-value-v1`, exact-version launch rejection, 64 KiB upload bounds, source byte preservation including a UTF-8 BOM, typed evidence, continuation after failures, duplicate delivery, late-result rejection, reconciliation, and access to run pages.
+- `python3 -m unittest discover -s runner -p 'test_*.py'` covers the native runner contract, including timeout with child processes, output caps, invalid UTF-8 output, recursion, unsupported and cyclic returns, and the 1 MiB return budget. The memory-limit case runs on Linux only.
 
 ### Hosted verification checklist
 
@@ -215,6 +235,12 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
 - [ ] Revise a test and then a criterion, open the original version from history, and confirm its values and referenced version IDs are unchanged.
 - [ ] Open the same active version in two sessions, save in one, then submit the older form in the other. Confirm the second researcher sees a conflict, keeps their edits, and the first save stays active.
 - [ ] Confirm the production database has no seeded assignment data.
+- [x] Run the `first_positive` example and confirm pass, mismatch, execution error, timeout, memory limit, and output limit appear as distinct outcomes.
+- [x] Confirm each test starts fresh, outbound traffic and DNS are blocked, and disposable app-file/credential canaries are inaccessible in the deployed runner.
+- [x] Interrupt a run while a test is in flight and confirm completed evidence remains, the started test becomes **Infrastructure failure**, and unstarted tests become **Not run**.
+- [x] Restore the runner and confirm a new known-good run succeeds without changing the interrupted run.
+- [x] Confirm cold and warm runner timing are shown separately from execution time.
+- [x] Reopen a saved run after editing the assignment and confirm its source, expected values, and results still resolve to the original versions.
 
 ## Implementation notes and deviations
 
@@ -242,7 +268,15 @@ src/
   password.mjs    shared Worker and Node Web Crypto password helpers
   repository.ts   D1 queries and immutable version writes
   web.ts          server-rendered assignment routes
+  coordinator.ts  sequential run execution and persistence
+  function-value.ts exact typed return comparison
+  runs.ts         submission and test-run storage and state transitions
+  runner.ts       private runner job/result contract
+  runs-web.ts     run summary and per-test evidence pages
+  upload.ts       bounded UTF-8 source uploads
 migrations/       D1 schema (no seeds)
+runner/           native Python runner, harness, image, contract tests
+runner-worker/    private Container Worker adapter and per-run routing
 scripts/          maintainer provisioning
 test/             unit and Workers-runtime integration tests
 docs/adr/         architecture decisions

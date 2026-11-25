@@ -7,7 +7,7 @@ export type JsonValue =
   | { [key: string]: JsonValue };
 
 // A canonical number token, not a JS number: its syntax retains its kind.
-class JsonNumber {
+export class JsonNumber {
   constructor(readonly text: string) {}
 }
 

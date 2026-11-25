@@ -28,6 +28,9 @@ An immutable, ordered set of tests and their expected outcomes for an assignment
 **Submission version**  
 A particular snapshot of a synthetic Python submission, including the source that was tested and reviewed.
 
+**Test run**\
+The record of one attempt to run a specific test suite version against a specific submission version. It identifies the runner configuration used and preserves the outcome or unavailability of each test.
+
 **Targeted correction**  
 A deliberate change made to address a known error in a synthetic submission.
 

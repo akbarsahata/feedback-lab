@@ -1,4 +1,7 @@
 import { handleAssignmentsApi } from './api';
+import { executeRun } from './coordinator';
+import { reconcileRuns } from './runs';
+import { handleRunsHtml } from './runs-web';
 import { handleAssignmentsHtml } from './web';
 import {
   authenticatedPostError,
@@ -30,6 +33,27 @@ export default {
       console.error(error);
       return jsonResponse({ error: 'internal_error' }, 500);
     }
+  },
+
+  async queue(batch: MessageBatch<{ runId?: unknown }>, env: Env): Promise<void> {
+    for (const message of batch.messages) {
+      try {
+        const runId = message.body?.runId;
+        if (typeof runId === 'string' && runId !== '') {
+          await executeRun(env, runId);
+        }
+      } catch (error) {
+        console.error(error);
+      } finally {
+        // #2 has no automatic execution retry: an infrastructure failure is
+        // recorded as an incomplete run and recovery uses a new run.
+        message.ack();
+      }
+    }
+  },
+
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    await reconcileRuns(env.DB, new Date());
   },
 };
 
@@ -75,6 +99,11 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   if (path === '/api/assignments' || path.startsWith('/api/assignments/')) {
     return handleAssignmentsApi(request, env, path);
+  }
+
+  const runsResponse = await handleRunsHtml(request, env, path);
+  if (runsResponse !== null) {
+    return runsResponse;
   }
 
   return notFound(request, await getSession(env.DB, request));
