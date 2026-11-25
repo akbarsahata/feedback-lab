@@ -189,6 +189,14 @@ Maintainer steps:
 4. `npm run deploy`.
 5. Complete the hosted checklist below.
 
+### Local verification performed
+
+- `npm test` (all unit and Workers-runtime integration tests) passes.
+- `npm run typecheck` passes.
+- `npm run dev` starts against local D1 under Node 22.14.
+- The `first_positive` create, reopen, metadata revision, and history flow was exercised manually with `curl` against the local Worker.
+- The hosted checks below remain unexecuted because no Cloudflare credentials were available.
+
 ### Hosted verification checklist (remaining)
 
 - [ ] Both researchers can sign in; each can open and revise the same assignment.
