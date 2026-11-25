@@ -157,6 +157,20 @@ export async function postForm(
   });
 }
 
+export async function clearDatabase(): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare('UPDATE assignments SET active_version_id = NULL'),
+    env.DB.prepare('DELETE FROM assignment_versions'),
+    env.DB.prepare('DELETE FROM assignments'),
+    env.DB.prepare('DELETE FROM rubric_criteria'),
+    env.DB.prepare('DELETE FROM rubric_versions'),
+    env.DB.prepare('DELETE FROM tests'),
+    env.DB.prepare('DELETE FROM test_suite_versions'),
+    env.DB.prepare('DELETE FROM sessions'),
+    env.DB.prepare('DELETE FROM users'),
+  ]);
+}
+
 export async function countRows(table: string): Promise<number> {
   const row = await env.DB.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first<{
     count: number;

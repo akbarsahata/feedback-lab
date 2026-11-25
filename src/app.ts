@@ -1,4 +1,5 @@
 import { handleAssignmentsApi } from './api';
+import { handleAssignmentsHtml } from './web';
 import {
   createSession,
   clearSessionCookie,
@@ -62,6 +63,11 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   if (path === '/') {
     return redirect('/assignments');
+  }
+
+  const htmlResponseForAssignments = await handleAssignmentsHtml(request, env, path);
+  if (htmlResponseForAssignments !== null) {
+    return htmlResponseForAssignments;
   }
 
   if (path === '/api/assignments' || path.startsWith('/api/assignments/')) {
@@ -150,10 +156,19 @@ function formString(form: FormData, name: string): string {
 }
 
 export function safeNext(value: string | null): string {
-  if (value === null || !value.startsWith('/') || value.startsWith('//')) {
+  if (value === null || !value.startsWith('/')) {
     return '/assignments';
   }
-  return value;
+  try {
+    const base = new URL('https://feedback-lab.invalid');
+    const target = new URL(value, base);
+    if (target.origin !== base.origin) {
+      return '/assignments';
+    }
+    return `${target.pathname}${target.search}${target.hash}`;
+  } catch {
+    return '/assignments';
+  }
 }
 
 
