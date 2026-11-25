@@ -189,9 +189,9 @@ Each test runs in a fresh native Python execution with standard library only. Th
 
 `function-value-v1` compares exact numbers without tolerance (`7` matches `7.0`), strict booleans (`True` differs from `1`), exact strings, `None` only with `null`, ordered lists, and dictionaries by key recursively. The actual value is tagged by the trusted runner so Python integer and float kinds never pass through JavaScript `Number`.
 
-The native runner lives in [`runner/`](runner/README.md). It exposes a private `POST /run` service. The Worker uses the optional `RUNNER` service binding and publishes committed runs through the optional `TEST_RUN_QUEUE` queue. When those bindings are absent, a run stays **Queued** locally and is reconciled as **Incomplete** after its dispatch deadline; it is never reported as executed. The exports in `src/app.ts` include the queue consumer and the scheduled reconciliation handler.
+The native runner lives in [`runner/`](runner/README.md), and its private Container Worker adapter lives in [`runner-worker/`](runner-worker). The Worker publishes committed runs through `feedback-lab-test-runs`; the queue consumer calls the private `RUNNER` service binding. Each **Test run** gets its own container instance, so state from one run cannot affect another. Within a run, each test still executes in a fresh Python child process.
 
-Hosted isolation and resource-limit verification must be performed against the deployed runner before issue #2 closes. Local tests use a fake runner and the Python contract tests; they do not prove the hosted boundary.
+The deployed runner uses the `basic` instance (0.25 vCPU, 1024 MiB), Python `3.12.11`, `enableInternet: false`, and the per-test limits above. The hosted verification record is in [`docs/verification/issue-2-hosted-runner.md`](docs/verification/issue-2-hosted-runner.md). Local tests use a fake runner and the Python contract tests; the hosted record is the evidence for the deployed boundary.
 
 ## Deployment
 
@@ -208,7 +208,7 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
    npm run provision -- --email researcher-b@example.edu --role researcher
    npm run provision -- --email member@example.edu --role member
    ```
-5. Deploy the native runner from [`runner/`](runner/README.md) behind a private `RUNNER` service binding. Until that binding exists, launches stay **Queued** and never claim to have executed.
+5. Deploy the private runner Worker: `npx wrangler deploy -c runner-worker/wrangler.jsonc`.
 6. `npm run deploy`.
 7. Complete the hosted checklist below.
 
@@ -235,12 +235,12 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
 - [ ] Revise a test and then a criterion, open the original version from history, and confirm its values and referenced version IDs are unchanged.
 - [ ] Open the same active version in two sessions, save in one, then submit the older form in the other. Confirm the second researcher sees a conflict, keeps their edits, and the first save stays active.
 - [ ] Confirm the production database has no seeded assignment data.
-- [ ] Run the `first_positive` example and confirm pass, mismatch, execution error, timeout, memory limit, and output limit appear as distinct outcomes.
-- [ ] Confirm each test starts fresh, outbound traffic and DNS are blocked, and disposable app-file/credential/service canaries are inaccessible in the deployed runner.
-- [ ] Interrupt a run after one recorded result and confirm completed evidence remains, a started test becomes **Infrastructure failure**, and unstarted tests become **Not run**.
-- [ ] Restore the runner and confirm a new known-good run succeeds without changing the interrupted run.
-- [ ] Confirm cold and warm runner timing are shown separately from execution time.
-- [ ] Reopen a saved run after editing the assignment and confirm its source, expected values, and results still resolve to the original versions.
+- [x] Run the `first_positive` example and confirm pass, mismatch, execution error, timeout, memory limit, and output limit appear as distinct outcomes.
+- [x] Confirm each test starts fresh, outbound traffic and DNS are blocked, and disposable app-file/credential canaries are inaccessible in the deployed runner.
+- [x] Interrupt a run while a test is in flight and confirm completed evidence remains, the started test becomes **Infrastructure failure**, and unstarted tests become **Not run**.
+- [x] Restore the runner and confirm a new known-good run succeeds without changing the interrupted run.
+- [x] Confirm cold and warm runner timing are shown separately from execution time.
+- [x] Reopen a saved run after editing the assignment and confirm its source, expected values, and results still resolve to the original versions.
 
 ## Implementation notes and deviations
 
@@ -276,6 +276,7 @@ src/
   upload.ts       bounded UTF-8 source uploads
 migrations/       D1 schema (no seeds)
 runner/           native Python runner, harness, image, contract tests
+runner-worker/    private Container Worker adapter and per-run routing
 scripts/          maintainer provisioning
 test/             unit and Workers-runtime integration tests
 docs/adr/         architecture decisions

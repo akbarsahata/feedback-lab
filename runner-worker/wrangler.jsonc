@@ -1,0 +1,38 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "feedback-lab-runner",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-20",
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true,
+    "redact_query_string": true
+  },
+  "containers": [
+    {
+      "class_name": "RunnerContainer",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "base": {
+          "dockerfile": "../runner/Dockerfile",
+          "build_context": "../runner"
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RUNNER_CONTAINER",
+        "class_name": "RunnerContainer"
+      }
+    ]
+  },
+  "exports": {
+    "RunnerContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}

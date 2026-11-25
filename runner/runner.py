@@ -198,12 +198,20 @@ def finish_job(
     if captured["output_limit"]:
         return common | {
             "outcome": "output_limit",
-            "diagnostic": "The combined standard output and standard error reached the configured cap.",
+            "diagnostic": (
+                "The combined standard output and standard error reached the configured cap "
+                f"({len(stdout.encode('utf-8')) + len(stderr.encode('utf-8'))} bytes retained)."
+            ),
         }
     if captured["timed_out"]:
         return common | {
             "outcome": "timed_out",
-            "diagnostic": "The execution reached the configured time limit.",
+            "diagnostic": (
+                "The execution reached the configured time limit "
+                f"(peak memory {captured['peak_memory'] // (1024 * 1024)} MiB, "
+                f"{len(stdout.encode('utf-8')) + len(stderr.encode('utf-8'))} output bytes captured, "
+                f"{captured['leftover']} leftover processes{leftover_detail(captured['leftover_pids'])})."
+            ),
         }
     if captured["memory_limited"] or captured["peak_memory"] >= limits["memoryMiB"] * 1024 * 1024:
         return common | {
@@ -343,7 +351,12 @@ def capture(
         process.wait(timeout=2)
     except subprocess.TimeoutExpired:
         kill_group(process)
-        process.wait()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+    reap_orphans()
     selector.close()
     for stream in (process.stdout, process.stderr):
         try:
@@ -360,7 +373,25 @@ def capture(
         "output_limit": output_limit,
         "memory_limited": memory_limited,
         "peak_memory": peak_memory,
+        "leftover": len(process_group_members(process.pid)),
+        "leftover_pids": process_group_members(process.pid),
     }
+
+
+def leftover_detail(pids: list[int]) -> str:
+    if not pids:
+        return ""
+    details = []
+    for pid in pids[:3]:
+        try:
+            comm = (Path("/proc") / str(pid) / "comm").read_text(errors="ignore").strip()
+            stat = (Path("/proc") / str(pid) / "stat").read_text(errors="ignore")
+            closing = stat.rfind(")")
+            state = stat[closing + 2 : closing + 3] if closing != -1 else "?"
+        except OSError:
+            comm, state = "?", "?"
+        details.append(f"{pid}:{comm}:{state}")
+    return f" ({', '.join(details)})"
 
 
 def cap_decoded_output(stdout: str, stderr: str, limit: int) -> tuple[str, str, bool]:
@@ -389,6 +420,71 @@ def kill_group(process: subprocess.Popen[bytes]) -> None:
         os.killpg(process.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
+    # killpg can be unavailable or fail in a sandbox. Scan /proc so no
+    # surviving child keeps consuming the container's CPU or output pipes.
+    for pid in process_group_members(process.pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        # The direct harness may remain a zombie until wait(); zombies consume
+        # no CPU, so only live descendants extend the deadline.
+        remaining = [
+            pid
+            for pid in process_group_members(process.pid)
+            if pid != process.pid and process_state(pid) != "Z"
+        ]
+        if not remaining:
+            return
+        time.sleep(0.02)
+
+
+def process_state(pid: int) -> str:
+    try:
+        stat = (Path("/proc") / str(pid) / "stat").read_text(errors="ignore")
+    except OSError:
+        return "?"
+    closing = stat.rfind(")")
+    return stat[closing + 2 : closing + 3] if closing != -1 else "?"
+
+
+def reap_orphans() -> None:
+    # The server is PID 1 in the container. Reap adopted children so timed-out
+    # tests do not accumulate zombies across runs.
+    if os.getpid() != 1:
+        return
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
+
+
+def process_group_members(pgid: int) -> list[int]:
+    root = Path("/proc")
+    if not root.is_dir():
+        return []
+    members: list[int] = []
+    for entry in root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(errors="ignore")
+        except OSError:
+            continue
+        closing = stat.rfind(")")
+        if closing == -1:
+            continue
+        fields = stat[closing + 2 :].split()
+        if len(fields) >= 3 and int(fields[2]) == pgid:
+            pid = int(entry.name)
+            if pid != os.getpid():
+                members.append(pid)
+    return members
 
 
 def process_tree_rss(root_pid: int) -> int:
@@ -507,7 +603,9 @@ def serve(port: int) -> None:
             sys.stderr.write("%s - %s\n" % (self.address_string(), format % args))
 
     server = HTTPServer(("0.0.0.0", port), Handler)
-    server.serve_forever()
+    while True:
+        server.handle_request()
+        reap_orphans()
 
 
 def main() -> int:

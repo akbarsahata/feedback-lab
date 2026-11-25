@@ -22,6 +22,9 @@
   ],
   // Runs are dispatched as IDs only. The private RUNNER service binding must be
   // configured before a queue message can execute tests.
+  "services": [
+    { "binding": "RUNNER", "service": "feedback-lab-runner" }
+  ],
   "queues": {
     "producers": [
       { "binding": "TEST_RUN_QUEUE", "queue": "feedback-lab-test-runs" }
@@ -31,6 +34,7 @@
         "queue": "feedback-lab-test-runs",
         "max_batch_size": 1,
         "max_batch_timeout": 1,
+        "max_concurrency": 1,
         "max_retries": 0
       }
     ]

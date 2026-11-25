@@ -14,5 +14,5 @@
     "allowJs": true,
     "types": ["@cloudflare/workers-types", "vitest/globals"]
   },
-  "include": ["src/**/*.ts", "src/**/*.mjs", "test/**/*.ts", "worker-configuration.d.ts", "vitest.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.mjs", "test/**/*.ts", "runner-worker/src/**/*.ts", "worker-configuration.d.ts", "vitest.config.ts"]
 }

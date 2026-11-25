@@ -5,7 +5,7 @@ export const MAX_ACTUAL_BYTES = 1024 * 1024;
 export const MAX_OUTPUT_BYTES = RUN_LIMITS.outputBytes;
 export const MAX_RUNNER_RESPONSE_BYTES = MAX_ACTUAL_BYTES + 64 * 1024;
 const MAX_DIAGNOSTIC_CHARS = 2000;
-const RUNNER_REQUEST_TIMEOUT_MS = 15_000;
+const RUNNER_REQUEST_TIMEOUT_MS = 60_000;
 
 export interface RunnerJob {
   protocol: typeof RUNNER_PROTOCOL;
@@ -183,7 +183,10 @@ export function createServiceRunner(env: { RUNNER?: Fetcher }): Runner {
     async runTest(job: RunnerJob): Promise<RunnerResult> {
       const response = await binding.fetch('https://runner/run', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          'x-run-id': job.runId,
+        },
         body: JSON.stringify(job),
         signal: AbortSignal.timeout(RUNNER_REQUEST_TIMEOUT_MS),
       });
@@ -201,11 +204,13 @@ export function createServiceRunner(env: { RUNNER?: Fetcher }): Runner {
       // A container adapter can report cold-start readiness separately from the
       // Python execution clock. The Python service itself leaves this absent.
       const startup = response.headers.get('x-runner-startup-ms');
-      if (parsed.startupMs === null && startup !== null && /^[0-9]+$/.test(startup)) {
+      if (startup !== null && /^[0-9]+$/.test(startup)) {
+        // The container adapter measures cold-start readiness, which is wider
+        // than the Python service's own process-start timestamp.
         parsed.startupMs = Number.parseInt(startup, 10);
       }
       const warm = response.headers.get('x-runner-warm');
-      if (parsed.warm === null && (warm === 'true' || warm === 'false')) {
+      if (warm === 'true' || warm === 'false') {
         parsed.warm = warm === 'true';
       }
       return parsed;
