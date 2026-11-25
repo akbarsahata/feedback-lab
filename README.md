@@ -214,7 +214,7 @@ Maintainer steps:
 - The research environment had no `cf` binary or Cloudflare login. The app uses `wrangler.jsonc` and Wrangler's Vitest integration, as documented in the local architecture notes.
 - Node.js 22.12+ is required by the installed Wrangler/Vitest releases; Node 20 cannot run Wrangler 4.168.
 - `@cloudflare/workers-types` is a dev dependency for editor/type-check support. It is not a runtime dependency.
-- The server normalizes stored JSON, so a submitted `[[4, -1]]` reopens as `[[4,-1]]`; the value is still one list argument.
+- Stored JSON is canonical (`[[4,-1]]`); the edit form and detail view pretty-print it as `[[4, -1]]`. The value is still one list argument, and no-op comparison uses the canonical values.
 - Tests use a small cleanup helper between cases because the installed Workers Vitest plugin did not isolate D1 storage between tests automatically. Production migrations never seed data.
 - No hosted checks have been run; see the checklist above.
 

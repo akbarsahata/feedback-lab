@@ -220,7 +220,7 @@ describe('create with the HTML form', () => {
     expect(html.indexOf('Iteration order')).toBeLessThan(html.indexOf('No positive value'));
     expect(html).toContain('list-argument');
     expect(html).toContain('empty-list');
-    expect(html).toContain('[[4,-1]]');
+    expect(html).toContain('[[4, -1]]');
     expect(html).toContain('null');
   });
 
@@ -310,7 +310,7 @@ describe('edit and history', () => {
     expect(html).toContain('value="First positive value"');
     expect(html).toContain('value="first_positive"');
     expect(html).toContain(`value="${version.id}"`);
-    expect(html).toContain('value="[[4,-1]]"');
+    expect(html).toContain('value="[[4, -1]]"');
     expect(html).toContain('value="null"');
     expect(html).toContain('value="r1"');
   });
@@ -378,7 +378,7 @@ describe('edit and history', () => {
     expect(html).toContain('not the active version');
     expect(html).toContain(version.rubricVersionId);
     expect(html).toContain(version.testSuiteVersionId);
-    expect(html).toContain('[[4,-1]]');
+    expect(html).toContain('[[4, -1]]');
     expect(html).not.toContain('action="/assignments/' + version.assignmentId + '"');
     expect(html).not.toContain('>Edit assignment<');
     expect(html).not.toContain('Later title');

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canonicalizeJson, parseJsonValue } from '../src/json';
+import { canonicalizeJson, formatJsonForDisplay, parseJsonValue } from '../src/json';
 
 describe('parseJsonValue', () => {
   it('parses the examples from the ticket', () => {
@@ -59,6 +59,18 @@ describe('parseJsonValue', () => {
     expect(() => parseJsonValue("{'a': 1}")).toThrow(/JSON/);
     expect(() => parseJsonValue('{"a": }')).toThrow(/JSON/);
     expect(() => parseJsonValue('nul')).toThrow(/JSON/);
+  });
+});
+
+describe('formatJsonForDisplay', () => {
+  it('adds readable spacing without changing values', () => {
+    expect(formatJsonForDisplay(parseJsonValue('[[4,-1]]'))).toBe('[[4, -1]]');
+    expect(formatJsonForDisplay(parseJsonValue('[[]]'))).toBe('[[]]');
+    expect(formatJsonForDisplay(parseJsonValue('[]'))).toBe('[]');
+    expect(formatJsonForDisplay(parseJsonValue('null'))).toBe('null');
+    expect(formatJsonForDisplay(parseJsonValue('{"b":1,"a":{"d":2,"c":3}}'))).toBe(
+      '{"a": {"c": 3, "d": 2}, "b": 1}',
+    );
   });
 });
 

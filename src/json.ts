@@ -35,6 +35,26 @@ export function canonicalizeJson(value: JsonValue): string {
   return JSON.stringify(sortObjectKeys(value));
 }
 
+/**
+ * Readable rendering for forms and detail tables. The stored form remains
+ * canonical; this only adds spaces after separators.
+ */
+export function formatJsonForDisplay(value: JsonValue): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(formatJsonForDisplay).join(', ')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.keys(value)
+      .sort()
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}: ${formatJsonForDisplay(value[key] as JsonValue)}`,
+      );
+    return `{${entries.join(', ')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function sortObjectKeys(value: JsonValue): JsonValue {
   if (Array.isArray(value)) {
     return value.map(sortObjectKeys);

@@ -1,6 +1,7 @@
 import type { SessionUser } from './auth';
 import type { ConfigErrors, RawConfig } from './config';
 import { escapeHtml, shell } from './html';
+import { formatJsonForDisplay, parseJsonValue } from './json';
 import type {
   AssignmentSummary,
   AssignmentVersionDetail,
@@ -341,8 +342,8 @@ ${isActive ? '<div class="banner ok"><span>This is the active version.</span><a 
           (test, index) => `<tr>
         <td>${index + 1}</td>
         <td><code>${e(test.id)}</code></td>
-        <td><code>${e(test.argumentsJson)}</code></td>
-        <td><code>${e(test.expectedReturnJson)}</code></td>
+        <td><code>${e(formatJsonForDisplay(parseJsonValue(test.argumentsJson)))}</code></td>
+        <td><code>${e(formatJsonForDisplay(parseJsonValue(test.expectedReturnJson)))}</code></td>
       </tr>`,
         )
         .join('')}</tbody>

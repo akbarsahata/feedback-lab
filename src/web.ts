@@ -5,6 +5,7 @@ import {
 } from './auth';
 import { validateConfig, type ConfigErrors, type RawConfig } from './config';
 import { parseAssignmentForm } from './forms';
+import { formatJsonForDisplay, parseJsonValue } from './json';
 import { requireResearcher } from './guard';
 import { messagePage } from './html';
 import { htmlResponse, methodNotAllowed, redirect } from './http';
@@ -307,8 +308,8 @@ function rawFromVersion(version: AssignmentVersionDetail): RawConfig {
     })),
     tests: version.tests.map((test) => ({
       id: test.id,
-      arguments: test.argumentsJson,
-      expectedReturn: test.expectedReturnJson,
+      arguments: formatJsonForDisplay(parseJsonValue(test.argumentsJson)),
+      expectedReturn: formatJsonForDisplay(parseJsonValue(test.expectedReturnJson)),
     })),
   };
 }
