@@ -163,8 +163,27 @@ export async function postForm(
   });
 }
 
+export async function postMultipart(
+  path: string,
+  form: FormData,
+  session: SignedIn,
+): Promise<Response> {
+  return SELF.fetch(`${BASE_URL}${path}`, {
+    method: 'POST',
+    headers: {
+      cookie: session.cookie,
+      origin: BASE_URL,
+    },
+    body: form,
+    redirect: 'manual',
+  });
+}
+
 export async function clearDatabase(): Promise<void> {
   await env.DB.batch([
+    env.DB.prepare('DELETE FROM test_results'),
+    env.DB.prepare('DELETE FROM test_runs'),
+    env.DB.prepare('DELETE FROM submission_versions'),
     env.DB.prepare('UPDATE assignments SET active_version_id = NULL'),
     env.DB.prepare('DELETE FROM assignment_versions'),
     env.DB.prepare('DELETE FROM assignments'),
