@@ -1,10 +1,17 @@
 export type JsonValue =
   | null
   | boolean
-  | number
+  | JsonNumber
   | string
   | JsonValue[]
   | { [key: string]: JsonValue };
+
+// A canonical number token, not a JS number: its syntax retains its kind.
+class JsonNumber {
+  constructor(readonly text: string) {}
+}
+
+export const MAX_JSON_DEPTH = 64;
 
 export class JsonParseError extends Error {
   readonly position: number;
@@ -32,7 +39,7 @@ export function parseJsonValue(source: string): JsonValue {
 }
 
 export function canonicalizeJson(value: JsonValue): string {
-  return JSON.stringify(sortObjectKeys(value));
+  return serializeJson(value, '');
 }
 
 /**
@@ -40,42 +47,32 @@ export function canonicalizeJson(value: JsonValue): string {
  * canonical; this only adds spaces after separators.
  */
 export function formatJsonForDisplay(value: JsonValue): string {
+  return serializeJson(value, ' ');
+}
+
+function serializeJson(value: JsonValue, space: string): string {
+  if (value instanceof JsonNumber) {
+    return value.text;
+  }
   if (Array.isArray(value)) {
-    return `[${value.map(formatJsonForDisplay).join(', ')}]`;
+    return `[${value.map((item) => serializeJson(item, space)).join(`,${space}`)}]`;
   }
   if (value !== null && typeof value === 'object') {
     const entries = Object.keys(value)
       .sort()
       .map(
         (key) =>
-          `${JSON.stringify(key)}: ${formatJsonForDisplay(value[key] as JsonValue)}`,
+          `${JSON.stringify(key)}:${space}${serializeJson(value[key]!, space)}`,
       );
-    return `{${entries.join(', ')}}`;
+    return `{${entries.join(`,${space}`)}}`;
   }
   return JSON.stringify(value);
 }
 
-function sortObjectKeys(value: JsonValue): JsonValue {
-  if (Array.isArray(value)) {
-    return value.map(sortObjectKeys);
-  }
-  if (value !== null && typeof value === 'object') {
-    const sorted: { [key: string]: JsonValue } = {};
-    for (const key of Object.keys(value).sort()) {
-      Object.defineProperty(sorted, key, {
-        value: sortObjectKeys(value[key] as JsonValue),
-        enumerable: true,
-        configurable: true,
-        writable: true,
-      });
-    }
-    return sorted;
-  }
-  return value;
-}
-
 class Parser {
   readonly source: string;
+  readonly numberPattern = /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/y;
+  readonly unescapedString = /[^"\\\x00-\x1f]+/y;
   position = 0;
 
   constructor(source: string) {
@@ -96,18 +93,21 @@ class Parser {
     }
   }
 
-  parseValue(): JsonValue {
+  parseValue(depth = 0): JsonValue {
     this.skipWhitespace();
     if (this.atEnd()) {
       throw new JsonParseError('expected a value', this.position);
     }
 
     const char = this.source[this.position];
+    if ((char === '{' || char === '[') && depth >= MAX_JSON_DEPTH) {
+      throw new JsonParseError(`use at most ${MAX_JSON_DEPTH} nested arrays or objects`, this.position);
+    }
     if (char === '{') {
-      return this.parseObject();
+      return this.parseObject(depth + 1);
     }
     if (char === '[') {
-      return this.parseArray();
+      return this.parseArray(depth + 1);
     }
     if (char === '"') {
       return this.parseString();
@@ -130,7 +130,7 @@ class Parser {
     throw new JsonParseError('expected a value', this.position);
   }
 
-  parseObject(): { [key: string]: JsonValue } {
+  parseObject(depth: number): { [key: string]: JsonValue } {
     this.position += 1;
     const result: { [key: string]: JsonValue } = {};
     const keys = new Set<string>();
@@ -157,7 +157,7 @@ class Parser {
         throw new JsonParseError('expected ":" after an object key', this.position);
       }
       this.position += 1;
-      const value = this.parseValue();
+      const value = this.parseValue(depth);
       Object.defineProperty(result, key, {
         value,
         enumerable: true,
@@ -178,7 +178,7 @@ class Parser {
     }
   }
 
-  parseArray(): JsonValue[] {
+  parseArray(depth: number): JsonValue[] {
     this.position += 1;
     const result: JsonValue[] = [];
     this.skipWhitespace();
@@ -188,7 +188,7 @@ class Parser {
     }
 
     while (true) {
-      result.push(this.parseValue());
+      result.push(this.parseValue(depth));
       this.skipWhitespace();
       const next = this.source[this.position];
       if (next === ']') {
@@ -208,6 +208,13 @@ class Parser {
     let result = '';
 
     while (!this.atEnd()) {
+      this.unescapedString.lastIndex = this.position;
+      const plain = this.unescapedString.exec(this.source);
+      if (plain !== null) {
+        result += plain[0];
+        this.position = this.unescapedString.lastIndex;
+        continue;
+      }
       const char = this.source[this.position];
       this.position += 1;
 
@@ -218,10 +225,7 @@ class Parser {
         result += this.parseEscape();
         continue;
       }
-      if (char !== undefined && char.charCodeAt(0) < 0x20) {
-        throw new JsonParseError('control characters must be escaped', this.position - 1);
-      }
-      result += char;
+      throw new JsonParseError('control characters must be escaped', this.position - 1);
     }
 
     throw new JsonParseError('unterminated string', start);
@@ -263,28 +267,30 @@ class Parser {
     }
   }
 
-  parseNumber(): number {
+  parseNumber(): JsonNumber {
     const start = this.position;
-    const match = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(
-      this.source.slice(this.position),
-    );
+    this.numberPattern.lastIndex = start;
+    const match = this.numberPattern.exec(this.source);
     if (match === null) {
       throw new JsonParseError('malformed number', start);
     }
 
     const raw = match[0];
     this.position += raw.length;
+    const isFloat = /[.eE]/.test(raw);
     const value = Number(raw);
+    if (!isFloat) {
+      // Compare exact decimal values, not Number#toString's rounded spelling.
+      if (!Number.isFinite(value) || (!Number.isSafeInteger(value) && BigInt(value) !== BigInt(raw))) {
+        throw new JsonParseError('integer cannot be stored exactly; use an exactly representable integer', start);
+      }
+      return new JsonNumber(value === 0 ? '0' : raw);
+    }
     if (!Number.isFinite(value)) {
       throw new JsonParseError('number must be finite', start);
     }
-    if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
-      throw new JsonParseError(
-        `integer ${raw} cannot be stored exactly; use an integer between ` +
-          `${Number.MIN_SAFE_INTEGER} and ${Number.MAX_SAFE_INTEGER}`,
-        start,
-      );
-    }
-    return value;
+    if (Object.is(value, -0)) return new JsonNumber('-0.0');
+    const text = String(value);
+    return new JsonNumber(/[.e]/.test(text) ? text : `${text}.0`);
   }
 }

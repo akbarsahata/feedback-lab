@@ -11,11 +11,9 @@ interface MutableRow {
 }
 
 const ROW_FIELD_PATTERN = /^(criteria|tests)\[(\d+)\]\[([A-Za-z]+)\]$/;
-const MAX_FORM_ROWS = 500;
-
 export function parseAssignmentForm(form: FormData): ParsedAssignmentForm {
-  const criteria = new Map<number, MutableRow>();
-  const tests = new Map<number, MutableRow>();
+  const criteria = new Map<string, MutableRow>();
+  const tests = new Map<string, MutableRow>();
 
   for (const [name, value] of form.entries()) {
     if (typeof value !== 'string') {
@@ -26,11 +24,8 @@ export function parseAssignmentForm(form: FormData): ParsedAssignmentForm {
       continue;
     }
     const list = match[1];
-    const index = Number(match[2]);
+    const index = match[2]!.replace(/^0+(?=\d)/, '');
     const field = match[3] as string;
-    if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_FORM_ROWS) {
-      continue;
-    }
     const rows = list === 'criteria' ? criteria : tests;
     let row = rows.get(index);
     if (row === undefined) {
@@ -65,9 +60,10 @@ export function parseAssignmentForm(form: FormData): ParsedAssignmentForm {
   };
 }
 
-function sortedRows(rows: Map<number, MutableRow>): MutableRow[] {
+function sortedRows(rows: Map<string, MutableRow>): MutableRow[] {
+  // For normalized decimal indices, digit count then lexical order is numeric order.
   return [...rows.entries()]
-    .sort(([left], [right]) => left - right)
+    .sort(([left], [right]) => left.length - right.length || (left < right ? -1 : left > right ? 1 : 0))
     .map(([, row]) => row);
 }
 

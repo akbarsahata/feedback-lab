@@ -1,6 +1,7 @@
 import {
   compareConfigs,
   isChanged,
+  type TestCase,
   type ValidatedConfig,
 } from './config';
 
@@ -31,33 +32,18 @@ export interface AssignmentSummary {
   updatedAt: string;
 }
 
-export interface CriterionRecord {
-  id: string;
-  description: string;
-  expectedBehavior: string;
-}
-
-export interface TestRecord {
-  id: string;
-  argumentsJson: string;
-  expectedReturnJson: string;
-  comparisonRule: string;
-}
-
-export interface AssignmentVersionDetail {
+interface VersionIdentity {
   id: string;
   assignmentId: string;
   versionNumber: number;
-  title: string;
-  description: string;
-  format: 'function';
-  entryPoint: string;
   rubricVersionId: string;
   testSuiteVersionId: string;
+}
+
+export interface AssignmentVersionDetail extends VersionIdentity, ValidatedConfig {
+  format: 'function';
   createdAt: string;
   createdBy: { id: string; email: string };
-  criteria: CriterionRecord[];
-  tests: TestRecord[];
 }
 
 export interface AssignmentVersionSummary {
@@ -167,20 +153,14 @@ export async function listVersions(
   db: D1Database,
   assignmentId: string,
 ): Promise<AssignmentVersionSummary[]> {
-  const assignment = await db
-    .prepare('SELECT id, active_version_id FROM assignments WHERE id = ?')
-    .bind(assignmentId)
-    .first<{ id: string; active_version_id: string | null }>();
-  if (assignment === null) {
-    throw new AssignmentNotFoundError();
-  }
-
   const { results } = await db
     .prepare(
-      `SELECT v.id, v.version_number, v.title, v.created_at, u.id AS user_id, u.email
-       FROM assignment_versions v
+      `SELECT v.id, v.version_number, v.title, v.created_at, u.id AS user_id, u.email,
+              (v.id = a.active_version_id) AS is_active
+       FROM assignments a
+       JOIN assignment_versions v ON v.assignment_id = a.id
        JOIN users u ON u.id = v.created_by
-       WHERE v.assignment_id = ?
+       WHERE a.id = ?
        ORDER BY v.version_number DESC`,
     )
     .bind(assignmentId)
@@ -191,7 +171,11 @@ export async function listVersions(
       created_at: string;
       user_id: string;
       email: string;
+      is_active: 0 | 1;
     }>();
+
+  // A saved assignment always has a version: creation and activation are atomic.
+  if (results.length === 0) throw new AssignmentNotFoundError();
 
   return results.map((row) => ({
     id: row.id,
@@ -199,7 +183,7 @@ export async function listVersions(
     title: row.title,
     createdAt: row.created_at,
     createdBy: { id: row.user_id, email: row.email },
-    isActive: row.id === assignment.active_version_id,
+    isActive: row.is_active === 1,
   }));
 }
 
@@ -220,24 +204,9 @@ export async function createAssignment(
       .bind(assignmentId, now, now),
     ...rubricStatements(db, rubricVersionId, config, now),
     ...testSuiteStatements(db, testSuiteVersionId, config, now),
-    db
-      .prepare(
-        `INSERT INTO assignment_versions
-          (id, assignment_id, version_number, title, description, format, entry_point,
-           rubric_version_id, test_suite_version_id, created_at, created_by)
-         VALUES (?, ?, 1, ?, ?, 'function', ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        versionId,
-        assignmentId,
-        config.title,
-        config.description,
-        config.entryPoint,
-        rubricVersionId,
-        testSuiteVersionId,
-        now,
-        userId,
-      ),
+    versionInsert(db, {
+      id: versionId, assignmentId, versionNumber: 1, rubricVersionId, testSuiteVersionId,
+    }, config, userId, now),
   ];
 
   await db.batch(statements);
@@ -262,7 +231,7 @@ export async function reviseAssignment(
     throw new StaleVersionError(active.id);
   }
 
-  const changes = compareConfigs(configFromDetail(active), config);
+  const changes = compareConfigs(active, config);
   if (!isChanged(changes)) {
     return { changed: false, version: active };
   }
@@ -280,27 +249,13 @@ export async function reviseAssignment(
   if (changes.tests) {
     statements.push(...testSuiteStatements(db, testSuiteVersionId, config, now));
   }
-  statements.push(
-    db
-      .prepare(
-        `INSERT INTO assignment_versions
-          (id, assignment_id, version_number, title, description, format, entry_point,
-           rubric_version_id, test_suite_version_id, created_at, created_by)
-         VALUES (?, ?, ?, ?, ?, 'function', ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        versionId,
-        assignmentId,
-        active.versionNumber + 1,
-        config.title,
-        config.description,
-        config.entryPoint,
-        rubricVersionId,
-        testSuiteVersionId,
-        now,
-        userId,
-      ),
-  );
+  statements.push(versionInsert(db, {
+    id: versionId,
+    assignmentId,
+    versionNumber: active.versionNumber + 1,
+    rubricVersionId,
+    testSuiteVersionId,
+  }, config, userId, now));
 
   try {
     await db.batch(statements);
@@ -318,23 +273,30 @@ export async function reviseAssignment(
   return { changed: true, version: await getVersion(db, assignmentId, versionId) };
 }
 
-export function configFromDetail(detail: AssignmentVersionDetail): ValidatedConfig {
-  return {
-    title: detail.title,
-    description: detail.description,
-    entryPoint: detail.entryPoint,
-    criteria: detail.criteria.map((criterion) => ({
-      id: criterion.id,
-      description: criterion.description,
-      expectedBehavior: criterion.expectedBehavior,
-    })),
-    tests: detail.tests.map((test) => ({
-      id: test.id,
-      argumentsJson: test.argumentsJson,
-      expectedReturnJson: test.expectedReturnJson,
-      comparisonRule: 'function-value-v1',
-    })),
-  };
+function versionInsert(
+  db: D1Database,
+  version: VersionIdentity,
+  config: ValidatedConfig,
+  userId: string,
+  now: string,
+): D1PreparedStatement {
+  return db.prepare(
+    `INSERT INTO assignment_versions
+      (id, assignment_id, version_number, title, description, format, entry_point,
+       rubric_version_id, test_suite_version_id, created_at, created_by)
+     VALUES (?, ?, ?, ?, ?, 'function', ?, ?, ?, ?, ?)`,
+  ).bind(
+    version.id,
+    version.assignmentId,
+    version.versionNumber,
+    config.title,
+    config.description,
+    config.entryPoint,
+    version.rubricVersionId,
+    version.testSuiteVersionId,
+    now,
+    userId,
+  );
 }
 
 async function getActiveVersionOrNull(
@@ -377,7 +339,7 @@ async function loadVersionDetail(
         test_id: string;
         arguments_json: string;
         expected_return_json: string;
-        comparison_rule: string;
+        comparison_rule: TestCase['comparisonRule'];
       }>(),
   ]);
 

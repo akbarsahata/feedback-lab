@@ -1,6 +1,5 @@
 import {
-  csrfTokenIsValid,
-  requestOriginIsAllowed,
+  authenticatedPostError,
   type SessionUser,
 } from './auth';
 import {
@@ -11,8 +10,7 @@ import {
   type RawTest,
 } from './config';
 import { requireResearcher } from './guard';
-import { jsonResponse } from './http';
-import { parseJsonValue } from './json';
+import { jsonResponse, jsonTextResponse } from './http';
 import {
   AssignmentNotFoundError,
   createAssignment,
@@ -36,8 +34,23 @@ export async function handleAssignmentsApi(
   if (!guarded.ok) {
     return guarded.response;
   }
-  const session = guarded.session;
+  try {
+    return await routeAssignmentsApi(request, env, path, guarded.session);
+  } catch (error) {
+    if (error instanceof AssignmentNotFoundError) return jsonResponse({ error: 'not_found' }, 404);
+    if (error instanceof InvalidRequestError) {
+      return jsonResponse({ error: 'invalid_request', message: error.message }, 400);
+    }
+    throw error;
+  }
+}
 
+async function routeAssignmentsApi(
+  request: Request,
+  env: Env,
+  path: string,
+  session: SessionUser,
+): Promise<Response> {
   if (path === '/api/assignments') {
     if (request.method === 'GET') {
       return jsonResponse({ assignments: await listAssignments(env.DB) });
@@ -52,9 +65,7 @@ export async function handleAssignmentsApi(
   if (versionsMatch !== null) {
     const assignmentId = versionsMatch[1] as string;
     if (request.method === 'GET') {
-      return wrapNotFound(async () =>
-        jsonResponse({ versions: await listVersions(env.DB, assignmentId) }),
-      );
+      return jsonResponse({ versions: await listVersions(env.DB, assignmentId) });
     }
     if (request.method === 'POST') {
       return reviseHandler(request, env, session, assignmentId);
@@ -66,23 +77,16 @@ export async function handleAssignmentsApi(
   if (versionMatch !== null && request.method === 'GET') {
     const assignmentId = versionMatch[1] as string;
     const versionId = versionMatch[2] as string;
-    return wrapNotFound(async () =>
-      jsonResponse({ version: serializeVersion(await getVersion(env.DB, assignmentId, versionId)) }),
-    );
+    return versionResponse(await getVersion(env.DB, assignmentId, versionId));
   }
 
   const assignmentMatch = /^\/api\/assignments\/([^/]+)$/.exec(path);
   if (assignmentMatch !== null && request.method === 'GET') {
     const assignmentId = assignmentMatch[1] as string;
-    return wrapNotFound(async () =>
-      jsonResponse({
-        version: serializeVersion(await getActiveVersion(env.DB, assignmentId)),
-      }),
-    );
+    return versionResponse(await getActiveVersion(env.DB, assignmentId));
   }
 
   if (
-    versionsMatch !== null ||
     versionMatch !== null ||
     assignmentMatch !== null
   ) {
@@ -102,20 +106,14 @@ async function createHandler(
     return writeError;
   }
 
-  let config: RawConfig;
-  try {
-    config = await readConfigBody(request);
-  } catch (error) {
-    return invalidRequest(error);
-  }
-
+  const config = readConfig(configValue(await readJsonObject(request)));
   const validation = validateConfig(config);
   if (!validation.ok) {
     return jsonResponse({ error: 'validation_failed', errors: validation.errors }, 400);
   }
 
   const version = await createAssignment(env.DB, validation.config, session.id);
-  return jsonResponse({ changed: true, version: serializeVersion(version) }, 201);
+  return versionResponse(version, true);
 }
 
 async function reviseHandler(
@@ -129,22 +127,13 @@ async function reviseHandler(
     return writeError;
   }
 
-  let body: Record<string, unknown>;
-  let config: RawConfig;
-  let baseVersionId: string;
-  try {
-    body = await readJsonObject(request);
-    const base = body.baseVersionId;
-    if (typeof base !== 'string' || base.trim() === '') {
-      throw new InvalidRequestError('baseVersionId is required.');
-    }
-    baseVersionId = base;
-    config = readConfig(configValue(body));
-  } catch (error) {
-    return invalidRequest(error);
+  const body = await readJsonObject(request);
+  const baseVersionId = body.baseVersionId;
+  if (typeof baseVersionId !== 'string' || baseVersionId.trim() === '') {
+    throw new InvalidRequestError('baseVersionId is required.');
   }
 
-  const validation = validateConfig(config);
+  const validation = validateConfig(readConfig(configValue(body)));
   if (!validation.ok) {
     return jsonResponse({ error: 'validation_failed', errors: validation.errors }, 400);
   }
@@ -157,10 +146,7 @@ async function reviseHandler(
       validation.config,
       session.id,
     );
-    return jsonResponse(
-      { changed: result.changed, version: serializeVersion(result.version) },
-      result.changed ? 201 : 200,
-    );
+    return versionResponse(result.version, result.changed);
   } catch (error) {
     if (error instanceof StaleVersionError) {
       return jsonResponse(
@@ -168,26 +154,13 @@ async function reviseHandler(
         409,
       );
     }
-    if (error instanceof AssignmentNotFoundError) {
-      return jsonResponse({ error: 'not_found' }, 404);
-    }
     throw error;
   }
 }
 
 function checkWriteRequest(request: Request, session: SessionUser): Response | null {
-  if (!requestOriginIsAllowed(request)) {
-    return jsonResponse({ error: 'invalid_origin' }, 403);
-  }
-  if (!csrfTokenIsValid(session, request.headers.get('x-csrf-token'))) {
-    return jsonResponse({ error: 'invalid_csrf' }, 403);
-  }
-  return null;
-}
-
-async function readConfigBody(request: Request): Promise<RawConfig> {
-  const body = await readJsonObject(request);
-  return readConfig(configValue(body));
+  const error = authenticatedPostError(request, session, request.headers.get('x-csrf-token'));
+  return error === null ? null : jsonResponse({ error }, 403);
 }
 
 function configValue(body: Record<string, unknown>): unknown {
@@ -251,13 +224,17 @@ function readTest(value: unknown, index: number): RawTest {
     throw new InvalidRequestError(`config.tests[${index}] must be an object.`);
   }
   const row = value as Record<string, unknown>;
+  const prefix = `config.tests[${index}]`;
+  const text = (key: 'arguments' | 'expectedReturn') => {
+    const canonical = `${key}Json`;
+    return Object.hasOwn(row, canonical)
+      ? readString(row[canonical], `${prefix}.${canonical}`)
+      : readString(row[key], `${prefix}.${key}`);
+  };
   return {
-    id: readString(row.id, `config.tests[${index}].id`),
-    arguments: readString(row.arguments, `config.tests[${index}].arguments`),
-    expectedReturn: readString(
-      row.expectedReturn,
-      `config.tests[${index}].expectedReturn`,
-    ),
+    id: readString(row.id, `${prefix}.id`),
+    arguments: text('arguments'),
+    expectedReturn: text('expectedReturn'),
   };
 }
 
@@ -271,56 +248,27 @@ function readString(value: unknown, field: string): string {
   return value;
 }
 
-function invalidRequest(error: unknown): Response {
-  if (error instanceof InvalidRequestError) {
-    return jsonResponse({ error: 'invalid_request', message: error.message }, 400);
-  }
-  throw error;
-}
-
-async function wrapNotFound(handler: () => Promise<Response>): Promise<Response> {
-  try {
-    return await handler();
-  } catch (error) {
-    if (error instanceof AssignmentNotFoundError) {
-      return jsonResponse({ error: 'not_found' }, 404);
-    }
-    throw error;
-  }
-}
-
-export function serializeVersion(version: AssignmentVersionDetail): Record<string, unknown> {
-  return {
-    id: version.id,
-    assignmentId: version.assignmentId,
-    versionNumber: version.versionNumber,
-    title: version.title,
-    description: version.description,
-    format: version.format,
-    entryPoint: version.entryPoint,
-    rubricVersionId: version.rubricVersionId,
-    testSuiteVersionId: version.testSuiteVersionId,
+function versionResponse(version: AssignmentVersionDetail, changed?: boolean): Response {
+  const { criteria, tests, ...metadata } = version;
+  const head = JSON.stringify({
+    ...metadata,
     rubric: {
       versionId: version.rubricVersionId,
-      criteria: version.criteria.map((criterion) => ({
-        id: criterion.id,
-        description: criterion.description,
-        expectedBehavior: criterion.expectedBehavior,
-      })),
+      criteria,
     },
-    testSuite: {
-      versionId: version.testSuiteVersionId,
-      comparisonRule: COMPARISON_RULE,
-      tests: version.tests.map((test) => ({
-        id: test.id,
-        arguments: parseJsonValue(test.argumentsJson),
-        argumentsJson: test.argumentsJson,
-        expectedReturn: parseJsonValue(test.expectedReturnJson),
-        expectedReturnJson: test.expectedReturnJson,
-        comparisonRule: test.comparisonRule,
-      })),
-    },
-    createdAt: version.createdAt,
-    createdBy: version.createdBy,
-  };
+  }).slice(0, -1);
+  const suite = JSON.stringify({
+    versionId: version.testSuiteVersionId,
+    comparisonRule: COMPARISON_RULE,
+  }).slice(0, -1);
+  // Only the validated, stored JSON values go on the wire verbatim. Parsing
+  // them as JS numbers before serializing would erase Python's numeric kinds.
+  const rows = tests.map((test) =>
+    `${JSON.stringify(test).slice(0, -1)},"arguments":${test.argumentsJson},"expectedReturn":${test.expectedReturnJson}}`,
+  ).join(',');
+  const writeResult = changed === undefined ? '' : `"changed":${changed},`;
+  return jsonTextResponse(
+    `{${writeResult}"version":${head},"testSuite":${suite},"tests":[${rows}]}}}`,
+    changed ? 201 : 200,
+  );
 }

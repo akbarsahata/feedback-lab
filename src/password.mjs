@@ -1,15 +1,23 @@
+// @ts-check
 export const PASSWORD_SCHEME = 'pbkdf2-sha256';
 export const PASSWORD_ITERATIONS = 100_000;
 const SALT_BYTES = 16;
 const HASH_BYTES = 32;
+const PASSWORD_ALPHABET =
+  'ABCDEFGHJKLMNPQRSTUVWXYZ' + 'abcdefghijkmnopqrstuvwxyz' + '123456789';
 
-export async function hashPassword(password: string): Promise<string> {
+/** @param {string} password */
+export async function hashPassword(password) {
   const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
   const hash = await derivePasswordBits(password, salt, PASSWORD_ITERATIONS, HASH_BYTES);
   return `${PASSWORD_SCHEME}$${PASSWORD_ITERATIONS}$${bytesToBase64(salt)}$${bytesToBase64(hash)}`;
 }
 
-export async function verifyPassword(password: string, stored: string): Promise<boolean> {
+/**
+ * @param {string} password
+ * @param {string} stored
+ */
+export async function verifyPassword(password, stored) {
   const parts = stored.split('$');
   if (parts.length !== 4) {
     return false;
@@ -24,8 +32,8 @@ export async function verifyPassword(password: string, stored: string): Promise<
     return false;
   }
 
-  let salt: Uint8Array;
-  let expected: Uint8Array;
+  let salt;
+  let expected;
   try {
     salt = base64ToBytes(saltText);
     expected = base64ToBytes(hashText);
@@ -40,7 +48,11 @@ export async function verifyPassword(password: string, stored: string): Promise<
   return constantTimeEqual(actual, expected);
 }
 
-export function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
+/**
+ * @param {Uint8Array} a
+ * @param {Uint8Array} b
+ */
+export function constantTimeEqual(a, b) {
   if (a.length !== b.length) {
     return false;
   }
@@ -51,12 +63,27 @@ export function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
   return difference === 0;
 }
 
-async function derivePasswordBits(
-  password: string,
-  salt: Uint8Array,
-  iterations: number,
-  length: number,
-): Promise<Uint8Array> {
+export function generatePassword(length = 20) {
+  const limit = 256 - (256 % PASSWORD_ALPHABET.length);
+  let password = '';
+  while (password.length < length) {
+    const bytes = crypto.getRandomValues(new Uint8Array(length * 2));
+    for (const byte of bytes) {
+      if (byte >= limit) continue;
+      password += PASSWORD_ALPHABET.charAt(byte % PASSWORD_ALPHABET.length);
+      if (password.length === length) break;
+    }
+  }
+  return password;
+}
+
+/**
+ * @param {string} password
+ * @param {Uint8Array<ArrayBuffer>} salt
+ * @param {number} iterations
+ * @param {number} length
+ */
+async function derivePasswordBits(password, salt, iterations, length) {
   const key = await crypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(password),
@@ -72,7 +99,8 @@ async function derivePasswordBits(
   return new Uint8Array(bits);
 }
 
-export function bytesToBase64(bytes: Uint8Array): string {
+/** @param {Uint8Array} bytes */
+function bytesToBase64(bytes) {
   let binary = '';
   for (const byte of bytes) {
     binary += String.fromCharCode(byte);
@@ -80,7 +108,8 @@ export function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-export function base64ToBytes(value: string): Uint8Array {
+/** @param {string} value */
+function base64ToBytes(value) {
   const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) {

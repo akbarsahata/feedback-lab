@@ -1,5 +1,5 @@
 import { env, SELF } from 'cloudflare:test';
-import { hashPassword } from '../src/password';
+import { hashPassword } from '../src/password.mjs';
 
 export const BASE_URL = 'https://feedback-lab.test';
 export const TEST_PASSWORD = 'feedback-lab-test-password';
@@ -35,11 +35,17 @@ export interface SignedIn {
   csrfToken: string;
 }
 
+export function testClientIp(): string {
+  const segments = crypto.randomUUID().replaceAll('-', '').slice(0, 24).match(/.{4}/g);
+  return `2001:db8:${segments!.join(':')}`;
+}
+
 export async function signIn(user: TestUser): Promise<SignedIn> {
   const response = await SELF.fetch(`${BASE_URL}/sign-in`, {
     method: 'POST',
     headers: {
       'content-type': 'application/x-www-form-urlencoded',
+      'cf-connecting-ip': testClientIp(),
       origin: BASE_URL,
     },
     body: new URLSearchParams({ email: user.email, password: user.password }).toString(),

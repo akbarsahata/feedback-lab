@@ -154,6 +154,70 @@ describe('API CSRF protection', () => {
 });
 
 describe('create and reopen a function assignment', () => {
+  it('preserves numeric kinds through revisions, exact reads, and no-op saves', async () => {
+    const researcher = await signIn(await seedUser());
+    const rest = '-0.0, 1e20, 9007199254740992, 1000000000000000128';
+    const config = assignmentConfig({
+      tests: [{
+        id: 'numbers',
+        arguments: `[1, ${rest}]`,
+        expectedReturn: '{"2":3,"10":[2,1],"x":5}',
+      }],
+    });
+    const { version: first } = await createAssignment(researcher, config);
+    const collection = `/api/assignments/${first.assignmentId}/versions`;
+    const second = await saveRevisionRaw(researcher, first.assignmentId, first, {
+      ...config,
+      tests: [{
+        id: 'numbers',
+        arguments: `[1.0, ${rest}]`,
+        expectedReturn: '{"2":3,"10":[2,1],"x":5.0}',
+      }],
+    });
+    expect(second.versionNumber).toBe(2);
+    expect(second.testSuiteVersionId).not.toBe(first.testSuiteVersionId);
+    expect(second.rubricVersionId).toBe(first.rubricVersionId);
+
+    const exact = await apiFetch(`${collection}/${second.id}`, { session: researcher });
+    expect(exact.status).toBe(200);
+    const wire = await exact.text();
+    const args = '[1.0,-0.0,100000000000000000000.0,9007199254740992,1000000000000000128]';
+    const expected = '{"10":[2,1],"2":3,"x":5.0}';
+    expect(wire).toContain(`"arguments":${args}`);
+    expect(wire).toContain(`"expectedReturn":${expected}`);
+    const reopened = JSON.parse(wire).version as SerializedVersion;
+    expect(reopened.testSuite.tests[0]?.argumentsJson).toBe(args);
+    expect(reopened.testSuite.tests[0]?.expectedReturnJson).toBe(expected);
+    const original = await apiJson(`${collection}/${first.id}`, { session: researcher });
+    expect(original.body.version.testSuite.tests[0].expectedReturnJson).toBe('{"10":[2,1],"2":3,"x":5}');
+    expect(original.body.version.testSuite.tests[0].argumentsJson).toBe(
+      '[1,-0.0,100000000000000000000.0,9007199254740992,1000000000000000128]',
+    );
+
+    const noOp = await postJson(collection, {
+      baseVersionId: second.id,
+      config: {
+        ...config,
+        tests: [{
+          id: 'numbers',
+          arguments: '[1e0, -0e0, 1e20, 9007199254740992, 1000000000000000128]',
+          expectedReturn: '{ "x":5e0, "2":3, "10":[2,1] }',
+        }],
+      },
+    }, researcher);
+    expect(noOp.response.status).toBe(200);
+    expect(noOp.body.changed).toBe(false);
+    expect(noOp.body.version.id).toBe(second.id);
+
+    const fromRead = await postJson(collection, {
+      baseVersionId: second.id,
+      config: { ...config, tests: reopened.testSuite.tests },
+    }, researcher);
+    expect(fromRead.response.status).toBe(200);
+    expect(fromRead.body.changed).toBe(false);
+    expect(fromRead.body.version.id).toBe(second.id);
+  });
+
   it('creates immutable snapshots and returns typed tests', async () => {
     const researcher = await signIn(await seedUser());
     const { response, body } = await postJson(
@@ -232,6 +296,10 @@ describe('create and reopen a function assignment', () => {
       session: researcher,
     });
     expect(unknownAssignment.response.status).toBe(404);
+    const unknownHistory = await apiJson(`/api/assignments/${crypto.randomUUID()}/versions`, {
+      session: researcher,
+    });
+    expect(unknownHistory.response.status).toBe(404);
   });
 
   it('does not return a version that belongs to another assignment', async () => {
@@ -252,6 +320,45 @@ describe('create and reopen a function assignment', () => {
 });
 
 describe('validation through the API', () => {
+  it('saves a long Unicode Python name under its canonical spelling', async () => {
+    const researcher = await signIn(await seedUser());
+    const suffix = '_λ'.repeat(130);
+    const created = await createAssignment(researcher, assignmentConfig({
+      entryPoint: `cafe\u0301${suffix}`,
+    }));
+    expect(created.status).toBe(201);
+    const exact = await apiJson(
+      `/api/assignments/${created.version.assignmentId}/versions/${created.version.id}`,
+      { session: researcher },
+    );
+    expect(exact.body.version.entryPoint).toBe(`café${suffix}`);
+
+    for (const entryPoint of ['Ⓐ', 'ͺname', 'ｃｌａｓｓ', 'a\u200Cb']) {
+      const invalid = await createAssignment(researcher, assignmentConfig({ entryPoint }));
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.errors.entryPoint).toMatch(/identifier|keyword/i);
+    }
+  });
+
+  it('rejects excessively nested JSON as an actionable row error', async () => {
+    const researcher = await signIn(await seedUser());
+    const nesting = (depth: number) => '['.repeat(depth) + '0' + ']'.repeat(depth);
+    const valid = await createAssignment(researcher, assignmentConfig({
+      tests: [{ id: 'nested', arguments: '[]', expectedReturn: nesting(64) }],
+    }));
+    expect(valid.status).toBe(201);
+    expect(valid.version.testSuite.tests[0]?.expectedReturnJson).toBe(nesting(64));
+    const result = await createAssignment(researcher, assignmentConfig({
+      tests: [{
+        id: 'nested',
+        arguments: '[]',
+        expectedReturn: nesting(65),
+      }],
+    }));
+    expect(result.status).toBe(400);
+    expect(result.body.errors.tests.rows[0].expectedReturn).toMatch(/at most 64.*nest/i);
+  });
+
   it('rejects invalid configuration and writes nothing', async () => {
     const researcher = await signIn(await seedUser());
     const { response, body } = await postJson(
@@ -370,7 +477,7 @@ describe('versioning table', () => {
 
     const all = await versions(researcher, assignmentId);
     expect(all.map((version) => version.versionNumber)).toEqual([5, 4, 3, 2, 1]);
-    expect(all.filter((version) => version.isActive)).toHaveLength(1);
+    expect(all.map((version) => version.isActive)).toEqual([true, false, false, false, false]);
     expect(all[0].id).toBe(current.id);
 
     // Historical configurations are unchanged, including child IDs and content.
@@ -509,7 +616,7 @@ describe('stale saves and races', () => {
       ),
     };
 
-    const [a, b] = await Promise.all([
+    const [a, b, historyInFlight] = await Promise.all([
       postJson(
         `/api/assignments/${assignmentId}/versions`,
         { baseVersionId: created.version.id, config: configA },
@@ -520,7 +627,11 @@ describe('stale saves and races', () => {
         { baseVersionId: created.version.id, config: configB },
         researcher,
       ),
+      versions(researcher, assignmentId),
     ]);
+    expect(historyInFlight.map((version) => version.isActive)).toEqual(
+      historyInFlight.length === 1 ? [true] : [true, false],
+    );
 
     const statuses = [a.response.status, b.response.status].sort();
     expect(statuses).toEqual([201, 409]);
@@ -535,6 +646,10 @@ describe('stale saves and races', () => {
 
     const active = await apiJson(`/api/assignments/${assignmentId}`, { session: researcher });
     expect(active.body.version.versionNumber).toBe(2);
+    expect((await versions(researcher, assignmentId)).map(({ id, isActive }) => ({ id, isActive }))).toEqual([
+      { id: active.body.version.id, isActive: true },
+      { id: created.version.id, isActive: false },
+    ]);
     const loser = a.response.status === 409 ? a : b;
     expect(loser.body.error).toBe('stale_version');
     expect(loser.body.currentVersionId).toBe(active.body.version.id);

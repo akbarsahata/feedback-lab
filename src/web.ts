@@ -1,13 +1,12 @@
 import {
-  csrfTokenIsValid,
-  requestOriginIsAllowed,
+  authenticatedPostError,
   type SessionUser,
 } from './auth';
-import { validateConfig, type ConfigErrors, type RawConfig } from './config';
+import { validateConfig, type RawConfig } from './config';
 import { parseAssignmentForm } from './forms';
 import { formatJsonForDisplay, parseJsonValue } from './json';
 import { requireResearcher } from './guard';
-import { messagePage } from './html';
+import { escapeHtml, messagePage, shell } from './html';
 import { htmlResponse, methodNotAllowed, redirect } from './http';
 import {
   assignmentDetailPage,
@@ -45,8 +44,20 @@ export async function handleAssignmentsHtml(
   if (!guarded.ok) {
     return guarded.response;
   }
-  const session = guarded.session;
+  try {
+    return await routeAssignmentsHtml(request, env, path, guarded.session);
+  } catch (error) {
+    if (error instanceof AssignmentNotFoundError) return notFoundPage(guarded.session);
+    throw error;
+  }
+}
 
+async function routeAssignmentsHtml(
+  request: Request,
+  env: Env,
+  path: string,
+  session: SessionUser,
+): Promise<Response> {
   if (path === '/assignments') {
     if (request.method === 'GET') {
       const assignments = await listAssignments(env.DB);
@@ -78,19 +89,15 @@ export async function handleAssignmentsHtml(
     }
     const assignmentId = versionMatch[1] as string;
     const versionId = versionMatch[2] as string;
-    return withNotFound(session, async () => {
-      const [version, active] = await Promise.all([
-        getVersion(env.DB, assignmentId, versionId),
-        getActiveVersion(env.DB, assignmentId),
-      ]);
-      return htmlResponse(
-        assignmentDetailPage({
-          user: session,
-          version,
-          isActive: version.id === active.id,
-        }),
-      );
-    });
+    const [version, active] = await Promise.all([
+      getVersion(env.DB, assignmentId, versionId),
+      getActiveVersion(env.DB, assignmentId),
+    ]);
+    return htmlResponse(assignmentDetailPage({
+      user: session,
+      version,
+      isActive: version.id === active.id,
+    }));
   }
 
   const editMatch = EDIT_PATH.exec(path);
@@ -99,18 +106,25 @@ export async function handleAssignmentsHtml(
       return methodNotAllowed('GET');
     }
     const assignmentId = editMatch[1] as string;
-    return withNotFound(session, async () => {
-      const active = await getActiveVersion(env.DB, assignmentId);
-      return htmlResponse(
-        assignmentFormPage({
-          user: session,
-          mode: 'edit',
-          assignmentId,
-          baseVersionId: active.id,
-          raw: rawFromVersion(active),
-        }),
-      );
-    });
+    const active = await getActiveVersion(env.DB, assignmentId);
+    const sourceVersionId = new URL(request.url).searchParams.get('version');
+    if (sourceVersionId !== null && sourceVersionId !== active.id) {
+      return htmlResponse(shell({
+        title: 'A newer version is active',
+        user: session,
+        body: `<div class="alert alert-warn" role="alert">
+  A newer version of this assignment is now active. The editor has not been opened.
+  <a href="/assignments/${escapeHtml(assignmentId)}/edit">Open the active version to edit</a>.
+</div>`,
+      }), 409);
+    }
+    return htmlResponse(assignmentFormPage({
+      user: session,
+      mode: 'edit',
+      assignmentId,
+      baseVersionId: active.id,
+      raw: rawFromVersion(active),
+    }));
   }
 
   const historyMatch = HISTORY_PATH.exec(path);
@@ -119,26 +133,19 @@ export async function handleAssignmentsHtml(
       return methodNotAllowed('GET');
     }
     const assignmentId = historyMatch[1] as string;
-    return withNotFound(session, async () => {
-      const versions = await listVersions(env.DB, assignmentId);
-      return htmlResponse(historyPage(session, assignmentId, versions));
-    });
+    return htmlResponse(historyPage(session, assignmentId, await listVersions(env.DB, assignmentId)));
   }
 
   const assignmentMatch = ASSIGNMENT_PATH.exec(path);
   if (assignmentMatch !== null) {
     const assignmentId = assignmentMatch[1] as string;
     if (request.method === 'GET') {
-      return withNotFound(session, async () => {
-        const active = await getActiveVersion(env.DB, assignmentId);
-        const notice =
-          new URL(request.url).searchParams.get('notice') === 'unchanged'
-            ? 'No changes to save; the active version is unchanged.'
-            : undefined;
-        return htmlResponse(
-          assignmentDetailPage({ user: session, version: active, notice }),
-        );
-      });
+      const active = await getActiveVersion(env.DB, assignmentId);
+      const notice =
+        new URL(request.url).searchParams.get('notice') === 'unchanged'
+          ? 'No changes to save; the active version is unchanged.'
+          : undefined;
+      return htmlResponse(assignmentDetailPage({ user: session, version: active, notice }));
     }
     if (request.method === 'POST') {
       return reviseAssignmentForm(request, env, session, assignmentId);
@@ -155,7 +162,7 @@ async function createAssignmentForm(
   session: SessionUser,
 ): Promise<Response> {
   const parsed = parseAssignmentForm(await request.formData());
-  if (writeRequestBlocked(request, session, parsed.csrfToken)) {
+  if (authenticatedPostError(request, session, parsed.csrfToken) !== null) {
     return blockedPage(session);
   }
 
@@ -183,38 +190,22 @@ async function reviseAssignmentForm(
   assignmentId: string,
 ): Promise<Response> {
   const parsed = parseAssignmentForm(await request.formData());
-  if (writeRequestBlocked(request, session, parsed.csrfToken)) {
+  if (authenticatedPostError(request, session, parsed.csrfToken) !== null) {
     return blockedPage(session);
   }
 
-  let active: AssignmentVersionDetail;
-  try {
-    active = await getActiveVersion(env.DB, assignmentId);
-  } catch (error) {
-    if (error instanceof AssignmentNotFoundError) {
-      return notFoundPage(session);
-    }
-    throw error;
-  }
-
-  const errors: ConfigErrors = {};
+  const baseVersionId = parsed.baseVersionId.trim() || undefined;
   const validation = validateConfig(parsed.raw);
-  if (!validation.ok) {
-    Object.assign(errors, validation.errors);
-  }
-  if (parsed.baseVersionId.trim() === '') {
-    errors.form =
-      'Open the current version before saving so the app can detect a newer save. Your input has been kept.';
-  }
-  if (!validation.ok || Object.keys(errors).length > 0) {
+  if (!validation.ok || baseVersionId === undefined) {
+    await getActiveVersion(env.DB, assignmentId); // Preserve 404 for an unknown assignment.
     return htmlResponse(
       assignmentFormPage({
         user: session,
         mode: 'edit',
         assignmentId,
-        baseVersionId: parsed.baseVersionId || active.id,
+        baseVersionId,
         raw: parsed.raw,
-        errors,
+        errors: validation.ok ? undefined : validation.errors,
       }),
       422,
     );
@@ -224,7 +215,7 @@ async function reviseAssignmentForm(
     const result = await reviseAssignment(
       env.DB,
       assignmentId,
-      parsed.baseVersionId,
+      baseVersionId,
       validation.config,
       session.id,
     );
@@ -238,26 +229,15 @@ async function reviseAssignmentForm(
           user: session,
           mode: 'edit',
           assignmentId,
-          baseVersionId: parsed.baseVersionId,
+          baseVersionId,
           raw: parsed.raw,
-          conflict: { currentVersionId: error.currentVersionId },
+          conflict: true,
         }),
         409,
       );
     }
-    if (error instanceof AssignmentNotFoundError) {
-      return notFoundPage(session);
-    }
     throw error;
   }
-}
-
-function writeRequestBlocked(
-  request: Request,
-  session: SessionUser,
-  csrfToken: string,
-): boolean {
-  return !requestOriginIsAllowed(request) || !csrfTokenIsValid(session, csrfToken);
 }
 
 function blockedPage(session: SessionUser): Response {
@@ -269,20 +249,6 @@ function blockedPage(session: SessionUser): Response {
     }),
     403,
   );
-}
-
-async function withNotFound(
-  session: SessionUser,
-  handler: () => Promise<Response>,
-): Promise<Response> {
-  try {
-    return await handler();
-  } catch (error) {
-    if (error instanceof AssignmentNotFoundError) {
-      return notFoundPage(session);
-    }
-    throw error;
-  }
 }
 
 function notFoundPage(session: SessionUser): Response {
@@ -301,11 +267,7 @@ function rawFromVersion(version: AssignmentVersionDetail): RawConfig {
     title: version.title,
     description: version.description,
     entryPoint: version.entryPoint,
-    criteria: version.criteria.map((criterion) => ({
-      id: criterion.id,
-      description: criterion.description,
-      expectedBehavior: criterion.expectedBehavior,
-    })),
+    criteria: version.criteria,
     tests: version.tests.map((test) => ({
       id: test.id,
       arguments: formatJsonForDisplay(parseJsonValue(test.argumentsJson)),

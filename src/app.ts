@@ -1,24 +1,26 @@
 import { handleAssignmentsApi } from './api';
 import { handleAssignmentsHtml } from './web';
 import {
+  authenticatedPostError,
   createSession,
   clearSessionCookie,
-  csrfTokenIsValid,
   deleteSession,
   getSession,
   requestOriginIsAllowed,
   sessionCookie,
   type SessionUser,
 } from './auth';
+import { formString } from './forms';
 import { messagePage, signInPage } from './html';
-import { htmlResponse, jsonResponse, methodNotAllowed, redirect } from './http';
-import { verifyPassword } from './password';
+import { htmlResponse, jsonResponse, localRedirectPath, methodNotAllowed, redirect } from './http';
+import { PASSWORD_ITERATIONS, PASSWORD_SCHEME, verifyPassword } from './password.mjs';
 
 const GENERIC_SIGN_IN_ERROR = 'Email or password is incorrect.';
+const SIGN_IN_RETRY_AFTER_SECONDS = 60;
 // A syntactically valid hash used to spend the same PBKDF2 work when the email
 // does not exist, so sign-in timing does not reveal registered accounts.
 const DUMMY_PASSWORD_HASH =
-  'pbkdf2-sha256$100000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+  `${PASSWORD_SCHEME}$${PASSWORD_ITERATIONS}$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=`;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -36,17 +38,14 @@ async function route(request: Request, env: Env): Promise<Response> {
   const path = normalizePath(url.pathname);
 
   if (path === '/sign-in') {
-    if (request.method === 'GET') {
-      const session = await getSession(env.DB, request);
-      if (session !== null) {
-        return redirect('/assignments');
-      }
-      return htmlResponse(signInPage({ next: safeNext(url.searchParams.get('next')) }));
+    if (request.method !== 'GET' && request.method !== 'POST') {
+      return methodNotAllowed('GET, POST');
     }
-    if (request.method === 'POST') {
-      return signIn(request, env);
-    }
-    return methodNotAllowed('GET, POST');
+    // A signed-in visit or submission does not replace or revoke a session.
+    if (await getSession(env.DB, request) !== null) return redirect('/assignments');
+    return request.method === 'POST'
+      ? signIn(request, env)
+      : htmlResponse(signInPage({ next: safeNext(url.searchParams.get('next')) }));
   }
 
   if (path === '/sign-out' && request.method === 'POST') {
@@ -86,6 +85,18 @@ async function signIn(request: Request, env: Env): Promise<Response> {
     return htmlResponse(signInPage({ error: 'This sign-in request was blocked.' }), 403);
   }
 
+  // The public Cloudflare edge supplies this header. Do not trust forwarded
+  // address lists; direct local requests without an edge share a single bucket.
+  const clientIp = request.headers.get('CF-Connecting-IP') ?? 'local-no-edge';
+  const { success } = await env.SIGN_IN_LIMITER.limit({ key: `feedback-lab:sign-in:${clientIp}` });
+  if (!success) {
+    return htmlResponse(
+      signInPage({ error: 'Too many sign-in attempts. Wait a minute and try again.' }),
+      429,
+      { 'retry-after': String(SIGN_IN_RETRY_AFTER_SECONDS) },
+    );
+  }
+
   const form = await request.formData();
   const email = formString(form, 'email').trim().toLowerCase();
   const password = formString(form, 'password');
@@ -120,7 +131,7 @@ async function signOut(request: Request, env: Env): Promise<Response> {
 
   const form = await request.formData();
   const csrfToken = formString(form, '_csrf');
-  if (!requestOriginIsAllowed(request) || !csrfTokenIsValid(session, csrfToken)) {
+  if (authenticatedPostError(request, session, csrfToken) !== null) {
     return htmlResponse(
       messagePage({
         title: 'Request blocked',
@@ -156,25 +167,6 @@ function normalizePath(pathname: string): string {
   return pathname;
 }
 
-function formString(form: FormData, name: string): string {
-  const value = form.get(name);
-  return typeof value === 'string' ? value : '';
+function safeNext(value: string | null): string {
+  return localRedirectPath(value) ?? '/assignments';
 }
-
-export function safeNext(value: string | null): string {
-  if (value === null || !value.startsWith('/')) {
-    return '/assignments';
-  }
-  try {
-    const base = new URL('https://feedback-lab.invalid');
-    const target = new URL(value, base);
-    if (target.origin !== base.origin) {
-      return '/assignments';
-    }
-    return `${target.pathname}${target.search}${target.hash}`;
-  } catch {
-    return '/assignments';
-  }
-}
-
-

@@ -2,15 +2,9 @@ import { canonicalizeJson, JsonParseError, parseJsonValue } from './json';
 
 export const COMPARISON_RULE = 'function-value-v1';
 
-export const LIMITS = {
-  title: 200,
-  description: 10_000,
-  entryPoint: 128,
-  itemId: 64,
-  itemText: 2_000,
-  jsonText: 10_000,
-  rows: 100,
-} as const;
+export const MAX_ROWS_PER_LIST = 100;
+export const MAX_CONFIG_MIB = 1;
+const encoder = new TextEncoder();
 
 export interface RawCriterion {
   id: string;
@@ -32,12 +26,6 @@ export interface RawConfig {
   tests: RawTest[];
 }
 
-export interface Criterion {
-  id: string;
-  description: string;
-  expectedBehavior: string;
-}
-
 export interface TestCase {
   id: string;
   argumentsJson: string;
@@ -49,7 +37,7 @@ export interface ValidatedConfig {
   title: string;
   description: string;
   entryPoint: string;
-  criteria: Criterion[];
+  criteria: RawCriterion[];
   tests: TestCase[];
 }
 
@@ -118,173 +106,144 @@ const PYTHON_KEYWORDS = new Set([
 ]);
 
 const ID_PATTERN = /^[a-z0-9_-]+$/;
-const IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const IDENTIFIER_PATTERN = /^[_\p{ID_Start}]\p{ID_Continue}*$/u;
+const CONTINUATION_PATTERN = /^\p{ID_Continue}+$/u;
+const JOIN_CONTROL = /[\u200c\u200d]/u;
+
+function isPythonIdentifier(value: string): boolean {
+  if (!IDENTIFIER_PATTERN.test(value) || JOIN_CONTROL.test(value)) return false;
+  // Python's XID rules require each character's NFKC expansion to stay
+  // within the appropriate identifier class, not just the whole name.
+  let pattern = IDENTIFIER_PATTERN;
+  for (const character of value) {
+    if (!pattern.test(character.normalize('NFKC'))) return false;
+    pattern = CONTINUATION_PATTERN;
+  }
+  return true;
+}
 
 export function validateConfig(raw: RawConfig): ConfigValidation {
   const errors: ConfigErrors = {};
-  const title = raw.title.trim();
-  const description = raw.description.trim();
-  const entryPoint = raw.entryPoint.trim();
+  const title = configText(raw.title);
+  const description = configText(raw.description);
+  const enteredName = raw.entryPoint.trim();
+  const entryPoint = enteredName.normalize('NFKC');
 
   if (title === '') {
     errors.title = 'Enter a title.';
-  } else if (title.length > LIMITS.title) {
-    errors.title = `Use ${LIMITS.title} characters or fewer for the title.`;
   }
 
   if (description === '') {
     errors.description = 'Enter a task description.';
-  } else if (description.length > LIMITS.description) {
-    errors.description = `Use ${LIMITS.description} characters or fewer for the task description.`;
   }
 
-  if (entryPoint === '') {
+  if (enteredName === '') {
     errors.entryPoint = 'Enter the function name the tests should call.';
-  } else if (entryPoint.length > LIMITS.entryPoint) {
-    errors.entryPoint = `Use ${LIMITS.entryPoint} characters or fewer for the entry point.`;
-  } else if (!IDENTIFIER_PATTERN.test(entryPoint)) {
+  } else if (!isPythonIdentifier(enteredName)) {
     errors.entryPoint =
       'Use a Python identifier such as first_positive (letters, digits, and underscores, not starting with a digit). Enter a function name only.';
   } else if (PYTHON_KEYWORDS.has(entryPoint)) {
     errors.entryPoint = `"${entryPoint}" is a Python keyword. Choose a different function name.`;
   }
 
-  const criteria = validateCriteria(raw.criteria, errors);
-  const tests = validateTests(raw.tests, errors);
+  const criteria = validateRows(
+    raw.criteria, errors, 'criteria',
+    (row, id, rowErrors) => {
+      const description = configText(row.description);
+      const expectedBehavior = configText(row.expectedBehavior);
+      if (description === '') rowErrors.description = 'Enter a description for this criterion.';
+      if (expectedBehavior === '') rowErrors.expectedBehavior = 'Enter the expected behavior for this criterion.';
+      return { id, description, expectedBehavior };
+    },
+  );
+  const tests = validateRows(
+    raw.tests, errors, 'tests',
+    (row, id, rowErrors): TestCase => ({
+      id,
+      argumentsJson: validateTestJson(row.arguments, 'arguments', rowErrors),
+      expectedReturnJson: validateTestJson(row.expectedReturn, 'expectedReturn', rowErrors),
+      comparisonRule: COMPARISON_RULE,
+    }),
+  );
 
-  if (hasErrors(errors)) {
+  if (Object.keys(errors).length > 0) {
     return { ok: false, errors };
   }
 
-  return {
-    ok: true,
-    config: {
-      title,
-      description,
-      entryPoint,
-      criteria,
-      tests,
-    },
-  };
+  const bytes = [title, description, entryPoint,
+    ...criteria.flatMap((row) => [row.id, row.description, row.expectedBehavior]),
+    ...tests.flatMap((row) => [row.id, row.argumentsJson, row.expectedReturnJson]),
+  ].reduce((size, text) => size + encoder.encode(text).byteLength, 0);
+  if (bytes > MAX_CONFIG_MIB * 1024 * 1024) {
+    return {
+      ok: false,
+      errors: { form: `The saved configuration exceeds ${MAX_CONFIG_MIB} MiB. Shorten the text or use smaller JSON values and try again.` },
+    };
+  }
+
+  return { ok: true, config: { title, description, entryPoint, criteria, tests } };
 }
 
-function validateCriteria(rawRows: RawCriterion[], errors: ConfigErrors): Criterion[] {
+function validateRows<RawRow extends { id: string }, SavedRow>(
+  rawRows: RawRow[],
+  errors: ConfigErrors,
+  key: 'criteria' | 'tests',
+  validateFields: (row: RawRow, id: string, rowErrors: RowFieldErrors) => SavedRow,
+): SavedRow[] {
+  const isRubric = key === 'criteria';
   const rows = rawRows
     .map((row, index) => ({ row, index }))
-    .filter(({ row }) => !isBlank(row.id) || !isBlank(row.description) || !isBlank(row.expectedBehavior));
+    .filter(({ row }) => Object.values(row).some((value) => value.trim() !== ''));
 
   const group: RowGroupErrors = { rows: {} };
-  const criteria: Criterion[] = [];
+  const saved: SavedRow[] = [];
   const seen = new Map<string, number>();
 
   if (rows.length === 0) {
-    group.message = 'Add at least one rubric criterion.';
-  } else if (rows.length > LIMITS.rows) {
-    group.message = `Use ${LIMITS.rows} rubric criteria or fewer.`;
+    group.message = `Add at least one ${isRubric ? 'rubric criterion' : 'test'}.`;
+  } else if (rows.length > MAX_ROWS_PER_LIST) {
+    group.message = `Use ${MAX_ROWS_PER_LIST} ${isRubric ? 'rubric criteria' : 'tests'} or fewer. Remove some rows and try again.`;
   } else {
     for (const { row, index } of rows) {
       const rowErrors: RowFieldErrors = {};
       const id = row.id.trim();
-      const description = row.description.trim();
-      const expectedBehavior = row.expectedBehavior.trim();
-
-      validateItemId(id, seen, 'rubric', index, rowErrors);
-      if (description === '') {
-        rowErrors.description = 'Enter a description for this criterion.';
-      } else if (description.length > LIMITS.itemText) {
-        rowErrors.description = `Use ${LIMITS.itemText} characters or fewer.`;
-      }
-      if (expectedBehavior === '') {
-        rowErrors.expectedBehavior = 'Enter the expected behavior for this criterion.';
-      } else if (expectedBehavior.length > LIMITS.itemText) {
-        rowErrors.expectedBehavior = `Use ${LIMITS.itemText} characters or fewer.`;
-      }
-
+      validateItemId(id, seen, isRubric ? 'rubric' : 'test suite', index, rowErrors);
+      const item = validateFields(row, id, rowErrors);
       if (Object.keys(rowErrors).length > 0) {
         group.rows[index] = rowErrors;
       } else {
-        criteria.push({ id, description, expectedBehavior });
+        saved.push(item);
       }
     }
   }
 
   if (group.message !== undefined || Object.keys(group.rows).length > 0) {
-    errors.criteria = group;
+    errors[key] = group;
   }
-  return criteria;
+  return saved;
 }
 
-function validateTests(rawRows: RawTest[], errors: ConfigErrors): TestCase[] {
-  const rows = rawRows
-    .map((row, index) => ({ row, index }))
-    .filter(({ row }) => !isBlank(row.id) || !isBlank(row.arguments) || !isBlank(row.expectedReturn));
-
-  const group: RowGroupErrors = { rows: {} };
-  const tests: TestCase[] = [];
-  const seen = new Map<string, number>();
-
-  if (rows.length === 0) {
-    group.message = 'Add at least one test.';
-  } else if (rows.length > LIMITS.rows) {
-    group.message = `Use ${LIMITS.rows} tests or fewer.`;
-  } else {
-    for (const { row, index } of rows) {
-      const rowErrors: RowFieldErrors = {};
-      const id = row.id.trim();
-      const argumentsText = row.arguments.trim();
-      const expectedText = row.expectedReturn.trim();
-
-      validateItemId(id, seen, 'test suite', index, rowErrors);
-
-      if (argumentsText === '') {
-        rowErrors.arguments =
-          'Enter arguments as a JSON array, for example [] or [[4, -1]].';
-      } else if (argumentsText.length > LIMITS.jsonText) {
-        rowErrors.arguments = `Use ${LIMITS.jsonText} characters or fewer.`;
-      } else {
-        try {
-          const parsed = parseJsonValue(argumentsText);
-          if (!Array.isArray(parsed)) {
-            rowErrors.arguments =
-              'Arguments must be a JSON array. Use [] for no arguments, [4, -1] for two arguments, or [[4, -1]] for one list argument.';
-          }
-        } catch (error) {
-          if (!(error instanceof JsonParseError)) throw error;
-          rowErrors.arguments = `${error.message}. Enter arguments as a JSON array, for example [] or [[4, -1]].`;
-        }
-      }
-
-      if (expectedText === '') {
-        rowErrors.expectedReturn =
-          'Enter an expected return value. Use null for Python None.';
-      } else if (expectedText.length > LIMITS.jsonText) {
-        rowErrors.expectedReturn = `Use ${LIMITS.jsonText} characters or fewer.`;
-      } else {
-        try {
-          parseJsonValue(expectedText);
-        } catch (error) {
-          if (!(error instanceof JsonParseError)) throw error;
-          rowErrors.expectedReturn = `${error.message}. Enter one JSON value; use null for Python None.`;
-        }
-      }
-
-      if (Object.keys(rowErrors).length > 0) {
-        group.rows[index] = rowErrors;
-      } else {
-        tests.push({
-          id,
-          argumentsJson: canonicalizeJson(parseJsonValue(argumentsText)),
-          expectedReturnJson: canonicalizeJson(parseJsonValue(expectedText)),
-          comparisonRule: COMPARISON_RULE,
-        });
-      }
-    }
+function validateTestJson(
+  text: string,
+  field: 'arguments' | 'expectedReturn',
+  errors: RowFieldErrors,
+): string {
+  const help = field === 'arguments'
+    ? 'Enter arguments as a JSON array, for example [] or [[4, -1]].'
+    : 'Enter an expected return value as JSON. Use null for Python None.';
+  if (text.trim() === '') {
+    errors[field] = help;
+    return '';
   }
-
-  if (group.message !== undefined || Object.keys(group.rows).length > 0) {
-    errors.tests = group;
+  try {
+    const value = parseJsonValue(text);
+    if (field !== 'arguments' || Array.isArray(value)) return canonicalizeJson(value);
+    errors[field] = `Arguments must be a JSON array. ${help}`;
+  } catch (error) {
+    if (!(error instanceof JsonParseError)) throw error;
+    errors[field] = `${error.message}. ${help}`;
   }
-  return tests;
+  return '';
 }
 
 function validateItemId(
@@ -298,8 +257,8 @@ function validateItemId(
     rowErrors.id = 'Enter an ID.';
     return;
   }
-  if (id.length > LIMITS.itemId || !ID_PATTERN.test(id)) {
-    rowErrors.id = `Use 1–${LIMITS.itemId} lowercase letters, digits, hyphens, or underscores.`;
+  if (!ID_PATTERN.test(id)) {
+    rowErrors.id = 'Use only lowercase letters, digits, hyphens, or underscores.';
     return;
   }
   const previous = seen.get(id);
@@ -310,19 +269,8 @@ function validateItemId(
   seen.set(id, rowIndex);
 }
 
-function isBlank(value: string): boolean {
-  return value.trim() === '';
-}
-
-function hasErrors(errors: ConfigErrors): boolean {
-  return (
-    errors.title !== undefined ||
-    errors.description !== undefined ||
-    errors.entryPoint !== undefined ||
-    errors.criteria !== undefined ||
-    errors.tests !== undefined ||
-    errors.form !== undefined
-  );
+function configText(value: string): string {
+  return value.replace(/\r\n?/g, '\n').trim();
 }
 
 export function compareConfigs(a: ValidatedConfig, b: ValidatedConfig): ConfigChanges {
@@ -340,7 +288,7 @@ export function isChanged(changes: ConfigChanges): boolean {
   return changes.metadata || changes.rubric || changes.tests;
 }
 
-function criteriaEqual(a: Criterion[], b: Criterion[]): boolean {
+function criteriaEqual(a: RawCriterion[], b: RawCriterion[]): boolean {
   return (
     a.length === b.length &&
     a.every(

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { generatePassword, hashPassword } from './password.mjs';
+import { generatePassword, hashPassword } from '../src/password.mjs';
 
 const USAGE = `Usage:
   npm run provision -- --email <email> --role researcher|member [--local] [--database feedback-lab]

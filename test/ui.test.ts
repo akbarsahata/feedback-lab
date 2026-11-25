@@ -191,6 +191,67 @@ describe('library', () => {
 });
 
 describe('create with the HTML form', () => {
+  it('saves sparse numeric row indices in numeric order without dropping high rows', async () => {
+    const researcher = await signIn(await seedUser());
+    const config = assignmentConfig();
+    const renamed = new Map([
+      ['criteria[0]', 'criteria[1200]'],
+      ['criteria[1]', 'criteria[9]'],
+      ['tests[0]', 'tests[900719925474099300000]'],
+      ['tests[1]', 'tests[900719925474099300001]'],
+    ]);
+    const fields = Object.fromEntries(Object.entries(formFields(config)).map(([key, value]) => [
+      key.replace(/^(criteria|tests)\[\d+\]/, (prefix) => renamed.get(prefix)!),
+      value,
+    ]));
+    const response = await postForm('/assignments', fields, researcher);
+    expect(response.status).toBe(303);
+    const exact = await (await get(response.headers.get('location')!, researcher)).text();
+    expect(exact.indexOf('No positive value')).toBeLessThan(exact.indexOf('Iteration order'));
+    expect(exact).toContain('list-argument');
+    expect(exact).toContain('empty-list');
+    expect(exact.indexOf('list-argument')).toBeLessThan(exact.indexOf('empty-list'));
+  });
+
+  it('keeps pasted multiline JSON on error and resaves the reopened near-limit value', async () => {
+    const researcher = await signIn(await seedUser());
+    const payload = 'a'.repeat(1024 * 1024 - 512);
+    const pasted = `\n[\n  "${payload}",\n  1.0,\n  -0.0\n]\n`;
+    const config = assignmentConfig({
+      title: '',
+      tests: [{ id: 'large', arguments: pasted, expectedReturn: 'null' }],
+    });
+    const invalid = await postForm('/assignments', formFields(config), researcher);
+    expect(invalid.status).toBe(422);
+    const invalidMarkup = await invalid.text();
+    expect(jsonTextarea(invalidMarkup, 'arguments')).toBe(pasted);
+
+    config.title = 'Large example';
+    const assignmentId = await createViaHtml(researcher, config);
+    const base = `/assignments/${assignmentId}`;
+    const active = await (await get(`${base}/edit`, researcher)).text();
+    const baseVersionId = /name="baseVersionId" value="([^"]+)"/.exec(active)?.[1];
+    expect(baseVersionId).toBeTruthy();
+    const reopenedArgs = jsonTextarea(active, 'arguments');
+    const reopenedExpected = jsonTextarea(active, 'expectedReturn');
+    expect(reopenedArgs).toBe(`["${payload}", 1.0, -0.0]`);
+    expect(reopenedExpected).toBe('null');
+    const unchanged = await postForm(base, {
+      ...formFields(config, baseVersionId),
+      'tests[0][arguments]': reopenedArgs,
+      'tests[0][expectedReturn]': reopenedExpected,
+    }, researcher);
+    expect(unchanged.status).toBe(303);
+    expect(unchanged.headers.get('location')).toBe(`${base}?notice=unchanged`);
+
+    const oversize = await postForm(base, {
+      ...formFields(config, baseVersionId),
+      'tests[0][arguments]': `["${payload}${'a'.repeat(512)}"]`,
+    }, researcher);
+    expect(oversize.status).toBe(422);
+    expect(await oversize.text()).toContain('1 MiB');
+  });
+
   it('renders the form with repeatable rows, CSRF, and the examples', async () => {
     const researcher = await signIn(await seedUser());
     const response = await get('/assignments/new', researcher);
@@ -243,6 +304,24 @@ describe('create with the HTML form', () => {
 });
 
 describe('validation errors in the HTML form', () => {
+  it('reports an over-limit list without truncating the editor rows', async () => {
+    const researcher = await signIn(await seedUser());
+    const tooMany = assignmentConfig({
+      tests: Array.from({ length: 101 }, (_, index) => ({
+        id: `test-${index}`,
+        arguments: '[]',
+        expectedReturn: String(index),
+      })),
+    });
+    const response = await postForm('/assignments', formFields(tooMany), researcher);
+    expect(response.status).toBe(422);
+    const html = await response.text();
+    expect(html).toContain('Use 100 tests or fewer');
+    expect(html).toContain('name="tests[100][id]" value="test-100"');
+    expect(jsonTextarea(html, 'expectedReturn', 100)).toBe('100');
+    expect(await countRows('assignments')).toBe(0);
+  });
+
   it('identifies fields and rows, preserves input, and writes nothing', async () => {
     const researcher = await signIn(await seedUser());
     const invalid = assignmentConfig({
@@ -268,8 +347,8 @@ describe('validation errors in the HTML form', () => {
     expect(html).toContain('Enter arguments as a JSON array');
     expect(html).toContain('already used in this test suite');
     expect(html).toContain('Invalid JSON');
-    expect(html).toContain('value="[1,]"');
-    expect(html).toContain('value="1e999"');
+    expect(jsonTextarea(html, 'arguments')).toBe('[1,]');
+    expect(jsonTextarea(html, 'expectedReturn', 1)).toBe('1e999');
     expect(await countRows('assignments')).toBe(0);
     expect(await countRows('assignment_versions')).toBe(0);
     expect(await countRows('rubric_versions')).toBe(0);
@@ -307,11 +386,11 @@ describe('edit and history', () => {
     const html = await response.text();
 
     expect(response.status).toBe(200);
-    expect(html).toContain('value="First positive value"');
+    expect(html).toContain('First positive value</textarea>');
     expect(html).toContain('value="first_positive"');
     expect(html).toContain(`value="${version.id}"`);
-    expect(html).toContain('value="[[4, -1]]"');
-    expect(html).toContain('value="null"');
+    expect(jsonTextarea(html, 'arguments')).toBe('[[4, -1]]');
+    expect(jsonTextarea(html, 'expectedReturn', 1)).toBe('null');
     expect(html).toContain('value="r1"');
   });
 
@@ -391,7 +470,7 @@ describe('edit and history', () => {
 
     const html = await (await get(`${base}/versions/${version.id}`, researcher)).text();
     expect(html).toContain('This is the active version');
-    expect(html).toContain(`href="${base}/edit"`);
+    expect(html).toContain(`href="${base}/edit?version=${version.id}"`);
   });
 
   it('does not allow historical configurations to be changed through their route', async () => {
@@ -452,7 +531,59 @@ describe('edit and history', () => {
   });
 });
 
+function jsonTextarea(html: string, field: 'arguments' | 'expectedReturn', index = 0): string {
+  const markup = new RegExp(`<textarea name="tests\\[${index}\\]\\[${field}\\]"[^>]*>\\n([\\s\\S]*?)</textarea>`).exec(html);
+  expect(markup).not.toBeNull();
+  return markup![1]!.replaceAll('&quot;', '"').replaceAll('&amp;', '&');
+}
+
 describe('stale HTML saves', () => {
+  it('requires reopening the active version when an edit has no base ID', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createViaApi(researcher);
+    const base = `/assignments/${version.assignmentId}`;
+    const draft = assignmentConfig({ title: 'My unbound draft' });
+    for (const baseVersionId of [undefined, '  ']) {
+      const response = await postForm(base, formFields(draft, baseVersionId), researcher);
+      expect(response.status).toBe(422);
+      const html = await response.text();
+      expect(html).toContain('My unbound draft');
+      expect(html).toContain(`href="${base}/edit"`);
+      expect(html).toContain('Open the active version');
+      expect(html).not.toContain('name="baseVersionId"');
+    }
+    const active = await (await get(base, researcher)).text();
+    expect(active).toContain(version.title);
+    expect(active).toContain('Version 1');
+  });
+
+  it('tells the researcher when the version linked by Edit is no longer active', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createViaApi(researcher);
+    const base = `/assignments/${version.assignmentId}`;
+    const detail = await (await get(base, researcher)).text();
+    const editLink = /href="([^"]+)"[^>]*>Edit assignment</.exec(detail)?.[1];
+    expect(editLink).toBe(`${base}/edit?version=${version.id}`);
+
+    const saved = await postForm(
+      base,
+      formFields(assignmentConfig({ title: 'Newer title' }), version.id),
+      researcher,
+    );
+    expect(saved.status).toBe(303);
+
+    const staleEdit = await get(editLink!, researcher);
+    expect(staleEdit.status).toBe(409);
+    const html = await staleEdit.text();
+    expect(html).toContain('newer version');
+    expect(html).toContain(`href="${base}/edit"`);
+    expect(html).not.toContain('name="baseVersionId"');
+
+    const activeEdit = await get(`${base}/edit`, researcher);
+    expect(activeEdit.status).toBe(200);
+    expect(await activeEdit.text()).toContain('Newer title</textarea>');
+  });
+
   it('explains the conflict, keeps edits, and leaves the newer version active', async () => {
     const researcherA = await signIn(await seedUser());
     const researcherB = await signIn(await seedUser());

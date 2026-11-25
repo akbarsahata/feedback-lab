@@ -12,7 +12,7 @@ button:hover,.button:hover{border-color:var(--accent)}.primary{background:var(--
 .brand{display:flex;align-items:center;gap:9px;color:var(--ink);text-decoration:none;font-size:17px;font-weight:750;padding:0 8px}
 .mark{background:var(--accent);border-radius:7px;color:white;width:29px;height:29px;display:grid;place-items:center;font:700 13px monospace}
 .nav{display:grid;gap:5px;margin-top:38px}.nav a{padding:9px 10px;border-radius:7px;display:flex;align-items:center;gap:9px;text-decoration:none;color:var(--muted);font-weight:620}
-.nav a[aria-current=page]{background:var(--soft);color:#203dab}.nav a:hover{background:var(--bg)}
+.nav a:hover{background:var(--bg)}
 .workspace{min-width:0}.bar{background:#fff;border-bottom:1px solid var(--line);min-height:64px;padding:13px 30px;display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--muted);font-size:13px;flex-wrap:wrap}
 .bar-user{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.wrap{max-width:1210px;margin:auto;padding:32px 30px 46px}
 .head{display:flex;align-items:start;justify-content:space-between;gap:16px;margin-bottom:24px;flex-wrap:wrap}
@@ -27,7 +27,7 @@ p{margin:0 0 12px}.muted,.small{color:var(--muted)}.small{font-size:13px}.head p
 .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;text-align:left}th,td{padding:12px 14px;border-bottom:1px solid #e4e9f0;vertical-align:middle}
 th{background:#f8f9fb;color:var(--muted);font-size:12px;font-weight:750}tr:last-child td{border-bottom:0}td a{font-weight:650}td.compact{white-space:nowrap}
 label{display:grid;gap:5px;min-width:0;font-weight:650}input,textarea{min-width:0;width:100%;padding:8px 10px;border:1px solid #bbc7d7;border-radius:6px;background:#fff;color:var(--ink)}
-textarea{min-height:88px;resize:vertical}.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}.wide{grid-column:1/-1}
+textarea{min-height:88px;resize:vertical}textarea[rows="1"]{min-height:0}.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}.wide{grid-column:1/-1}
 .field{display:grid;gap:8px}.field-error{margin:0;color:var(--bad);font-size:12px;font-weight:600}
 .alert{margin-bottom:16px;padding:11px 13px;border-radius:7px;border:1px solid var(--line);background:#fff;font-size:14px}
 .alert-error{border-color:#e6b4ba;background:var(--bad-bg);color:#7d1b27}.alert-warn{border-color:#eed398;background:var(--warn-bg);color:#68440e}
@@ -70,11 +70,9 @@ export interface ShellOptions {
   title: string;
   user: SessionUser;
   body: string;
-  activeNav?: 'assignments';
 }
 
-export function shell({ title, user, body, activeNav }: ShellOptions): string {
-  const navCurrent = activeNav === 'assignments' ? ' aria-current="page"' : '';
+function documentPage(title: string, content: string): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -83,12 +81,16 @@ export function shell({ title, user, body, activeNav }: ShellOptions): string {
 <title>${escapeHtml(title)} · Feedback Lab</title>
 <style>${STYLES}</style>
 </head>
-<body>
-<div class="shell">
+<body>${content}</body>
+</html>`;
+}
+
+export function shell({ title, user, body }: ShellOptions): string {
+  return documentPage(title, `<div class="shell">
 <aside class="rail">
   ${brand()}
   <nav class="nav" aria-label="Main navigation">
-    <a href="/assignments"${navCurrent}><span aria-hidden="true">▤</span>Assignments</a>
+    <a href="/assignments"><span aria-hidden="true">▤</span>Assignments</a>
   </nav>
 </aside>
 <div class="workspace">
@@ -108,9 +110,7 @@ export function shell({ title, user, body, activeNav }: ShellOptions): string {
     <div class="footnote">Feedback Lab prototype · function assignments only in this release.</div>
   </main>
 </div>
-</div>
-</body>
-</html>`;
+</div>`);
 }
 
 export interface SignInPageOptions {
@@ -120,16 +120,7 @@ export interface SignInPageOptions {
 }
 
 export function signInPage({ error, email = '', next = '' }: SignInPageOptions = {}): string {
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign in · Feedback Lab</title>
-<style>${STYLES}</style>
-</head>
-<body>
-<div class="auth-shell">
+  return documentPage('Sign in', `<div class="auth-shell">
 <main class="auth-card">
   ${brand()}
   <h1>Sign in</h1>
@@ -143,9 +134,7 @@ export function signInPage({ error, email = '', next = '' }: SignInPageOptions =
   </form>
   <p class="small footnote">Need access? Ask a maintainer to provision a researcher account. Sign-up and role changes are not available in the app.</p>
 </main>
-</div>
-</body>
-</html>`;
+</div>`);
 }
 
 export interface MessagePageOptions {
@@ -159,17 +148,9 @@ export function messagePage({ title, message, user }: MessagePageOptions): strin
 <div class="panel pad"><p>Return to the <a href="/assignments">assignment library</a>.</p></div>`;
 
   if (user === undefined) {
-    return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${escapeHtml(title)} · Feedback Lab</title>
-<style>${STYLES}</style>
-</head>
-<body><div class="auth-shell"><main class="auth-card">${brand()}<h1>${escapeHtml(title)}</h1><p class="muted">${escapeHtml(message)}</p><p><a href="/sign-in">Go to sign in</a></p></main></div></body>
-</html>`;
+    return documentPage(title,
+      `<div class="auth-shell"><main class="auth-card">${brand()}<h1>${escapeHtml(title)}</h1><p class="muted">${escapeHtml(message)}</p><p><a href="/sign-in">Go to sign in</a></p></main></div>`);
   }
 
-  return shell({ title, user, body, activeNav: 'assignments' });
+  return shell({ title, user, body });
 }

@@ -6,6 +6,7 @@ import {
   getCookieAttributes,
   seedUser,
   signIn,
+  testClientIp,
 } from './helpers';
 
 async function sessionFor(cookie: string) {
@@ -28,6 +29,7 @@ describe('sign-in', () => {
     const html = await response.text();
 
     expect(response.status).toBe(200);
+    expect(response.headers.get('referrer-policy')).toBe('same-origin');
     expect(html).toContain('name="email"');
     expect(html).toContain('name="password"');
     expect(html).toContain('Sign in');
@@ -41,6 +43,7 @@ describe('sign-in', () => {
       method: 'POST',
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
+        'cf-connecting-ip': testClientIp(),
         origin: BASE_URL,
       },
       body: new URLSearchParams({ email: user.email, password: user.password }).toString(),
@@ -87,6 +90,7 @@ describe('sign-in', () => {
       method: 'POST',
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
+        'cf-connecting-ip': testClientIp(),
         origin: BASE_URL,
       },
       body: new URLSearchParams({ email: user.email, password: 'wrong-password' }).toString(),
@@ -98,6 +102,7 @@ describe('sign-in', () => {
       method: 'POST',
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
+        'cf-connecting-ip': testClientIp(),
         origin: BASE_URL,
       },
       body: new URLSearchParams({
@@ -123,22 +128,25 @@ describe('sign-in', () => {
       method: 'POST',
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
+        'cf-connecting-ip': testClientIp(),
         origin: BASE_URL,
       },
       body: new URLSearchParams({
         email: user.email,
         password: user.password,
-        next: '/assignments/some-id/edit',
+        next: '/assignments/some-id/./edit?version=example#details',
       }).toString(),
       redirect: 'manual',
     });
     expect(first.status).toBe(303);
-    expect(first.headers.get('location')).toBe('/assignments/some-id/edit');
+    expect(first.headers.get('location')).toBe('/assignments/some-id/edit?version=example#details');
+    expect(new URL(first.headers.get('location')!, BASE_URL).origin).toBe(BASE_URL);
 
     const second = await SELF.fetch(`${BASE_URL}/sign-in`, {
       method: 'POST',
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
+        'cf-connecting-ip': testClientIp(),
         origin: BASE_URL,
       },
       body: new URLSearchParams({
@@ -150,6 +158,7 @@ describe('sign-in', () => {
     });
     expect(second.status).toBe(303);
     expect(second.headers.get('location')).toBe('/assignments');
+    expect(new URL(second.headers.get('location')!, BASE_URL).origin).toBe(BASE_URL);
   });
 
   it('redirects an already signed-in user away from the sign-in page', async () => {
@@ -161,6 +170,64 @@ describe('sign-in', () => {
 
     expect(response.status).toBe(303);
     expect(response.headers.get('location')).toBe('/assignments');
+  });
+
+  it('keeps the session and CSRF token when a signed-in user submits sign-in again', async () => {
+    const user = await seedUser();
+    const session = await signIn(user);
+    const response = await SELF.fetch(`${BASE_URL}/sign-in`, {
+      method: 'POST',
+      headers: {
+        cookie: session.cookie,
+        origin: BASE_URL,
+      },
+      body: new URLSearchParams({ email: user.email, password: user.password }),
+      redirect: 'manual',
+    });
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toBe('/assignments');
+    expect(response.headers.get('set-cookie')).toBeNull();
+    expect((await sessionFor(session.cookie)).body).toMatchObject({
+      authenticated: true,
+      user: { email: user.email },
+      csrfToken: session.csrfToken,
+    });
+  });
+
+  it('throttles anonymous sign-in attempts by edge client IP, without blocking a signed-in session', async () => {
+    const user = await seedUser();
+    const session = await signIn(user);
+    const ip = testClientIp();
+    const attempt = (clientIp: string, password: string, cookie?: string) =>
+      SELF.fetch(`${BASE_URL}/sign-in`, {
+        method: 'POST',
+        headers: {
+          'cf-connecting-ip': clientIp,
+          origin: BASE_URL,
+          ...(cookie === undefined ? {} : { cookie }),
+        },
+        body: new URLSearchParams({ email: user.email, password }),
+        redirect: 'manual',
+      });
+
+    for (let index = 0; index < 12; index++) {
+      const rejected = await attempt(ip, 'wrong-password');
+      expect(rejected.status).toBe(401);
+      await rejected.text();
+    }
+    const throttled = await attempt(ip, user.password);
+    expect(throttled.status).toBe(429);
+    expect(throttled.headers.get('retry-after')).toBe('60');
+    expect(throttled.headers.get('set-cookie')).toBeNull();
+    expect(await throttled.text()).toContain('Too many sign-in attempts');
+
+    const unaffected = await attempt(testClientIp(), user.password);
+    expect(unaffected.status).toBe(303);
+    expect(unaffected.headers.get('set-cookie')).not.toBeNull();
+
+    const signedIn = await attempt(ip, user.password, session.cookie);
+    expect(signedIn.status).toBe(303);
+    expect(signedIn.headers.get('set-cookie')).toBeNull();
   });
 });
 
@@ -253,6 +320,7 @@ describe('sessions', () => {
       method: 'POST',
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
+        'cf-connecting-ip': testClientIp(),
         origin: 'https://evil.example',
       },
       body: new URLSearchParams({ email: user.email, password: user.password }).toString(),

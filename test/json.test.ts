@@ -1,25 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import { canonicalizeJson, formatJsonForDisplay, parseJsonValue } from '../src/json';
 
+function canonical(source: string): string {
+  return canonicalizeJson(parseJsonValue(source));
+}
+
 describe('parseJsonValue', () => {
   it('parses the examples from the ticket', () => {
     expect(parseJsonValue('[]')).toEqual([]);
-    expect(parseJsonValue('[4, -1]')).toEqual([4, -1]);
-    expect(parseJsonValue('[[4, -1]]')).toEqual([[4, -1]]);
+    expect(canonical('[4, -1]')).toBe('[4,-1]');
+    expect(canonical('[[4, -1]]')).toBe('[[4,-1]]');
     expect(parseJsonValue('[[]]')).toEqual([[]]);
     expect(parseJsonValue('null')).toBeNull();
   });
 
   it('parses nested supported values', () => {
-    const value = parseJsonValue(
+    const value = canonical(
       '{"name": "Ada", "scores": [1, 2.5, true, false, null, [], {}], "meta": {"ok": true}}',
     );
 
-    expect(value).toEqual({
-      name: 'Ada',
-      scores: [1, 2.5, true, false, null, [], {}],
-      meta: { ok: true },
-    });
+    expect(value).toBe('{"meta":{"ok":true},"name":"Ada","scores":[1,2.5,true,false,null,[],{}]}');
   });
 
   it('parses strings with JSON escapes', () => {
@@ -36,13 +36,13 @@ describe('parseJsonValue', () => {
   });
 
   it('rejects integers that cannot be stored exactly', () => {
-    expect(() => parseJsonValue('9007199254740992')).toThrow(/integer/i);
+    expect(() => parseJsonValue('9007199254740993')).toThrow(/integer/i);
     expect(() => parseJsonValue('[-9007199254740993]')).toThrow(/integer/i);
   });
 
   it('accepts the largest safe integers', () => {
-    expect(parseJsonValue('9007199254740991')).toBe(Number.MAX_SAFE_INTEGER);
-    expect(parseJsonValue('-9007199254740991')).toBe(Number.MIN_SAFE_INTEGER);
+    expect(canonical('9007199254740991')).toBe('9007199254740991');
+    expect(canonical('-9007199254740991')).toBe('-9007199254740991');
   });
 
   it('rejects non-finite numbers', () => {
@@ -77,7 +77,7 @@ describe('formatJsonForDisplay', () => {
 describe('canonicalizeJson', () => {
   it('sorts object keys without changing array order', () => {
     expect(
-      canonicalizeJson({ b: 1, a: { d: [3, 1, 2], c: 2 } }),
+      canonical('{"b":1,"a":{"d":[3,1,2],"c":2}}'),
     ).toBe('{"a":{"c":2,"d":[3,1,2]},"b":1}');
   });
 

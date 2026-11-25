@@ -1,11 +1,18 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "feedback-lab",
-  "main": "src/index.ts",
+  "main": "src/app.ts",
   "compatibility_date": "2026-11-20",
   "observability": {
     "enabled": true
   },
+  "ratelimits": [
+    {
+      "name": "SIGN_IN_LIMITER",
+      "namespace_id": "664741002",
+      "simple": { "limit": 12, "period": 60 }
+    }
+  ],
   "d1_databases": [
     {
       "binding": "DB",

@@ -1,4 +1,4 @@
-import { constantTimeEqual } from './password';
+import { constantTimeEqual } from './password.mjs';
 
 export const SESSION_COOKIE = 'fl_session';
 export const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -126,7 +126,13 @@ export function requestOriginIsAllowed(request: Request): boolean {
   }
 }
 
-export function csrfTokenIsValid(session: SessionUser, provided: string | null): boolean {
+export function authenticatedPostError(request: Request, session: SessionUser, token: string | null) {
+  if (!requestOriginIsAllowed(request)) return 'invalid_origin';
+  if (!csrfTokenIsValid(session, token)) return 'invalid_csrf';
+  return null;
+}
+
+function csrfTokenIsValid(session: SessionUser, provided: string | null): boolean {
   if (provided === null || provided === '') {
     return false;
   }

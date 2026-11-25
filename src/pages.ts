@@ -1,14 +1,13 @@
 import type { SessionUser } from './auth';
-import type { ConfigErrors, RawConfig } from './config';
+import { COMPARISON_RULE, MAX_CONFIG_MIB, MAX_ROWS_PER_LIST, type ConfigErrors, type RawConfig } from './config';
+import { repeatableRowsScript } from './editor-script';
 import { escapeHtml, shell } from './html';
-import { formatJsonForDisplay, parseJsonValue } from './json';
+import { MAX_JSON_DEPTH, formatJsonForDisplay, parseJsonValue } from './json';
 import type {
   AssignmentSummary,
   AssignmentVersionDetail,
   AssignmentVersionSummary,
 } from './repository';
-
-const e = escapeHtml;
 
 export function libraryPage(user: SessionUser, assignments: AssignmentSummary[]): string {
   const body = `<div class="head">
@@ -17,7 +16,7 @@ export function libraryPage(user: SessionUser, assignments: AssignmentSummary[])
 </div>
 ${assignments.length === 0 ? emptyLibrary() : libraryTable(assignments)}`;
 
-  return shell({ title: 'Assignments', user, body, activeNav: 'assignments' });
+  return shell({ title: 'Assignments', user, body });
 }
 
 function emptyLibrary(): string {
@@ -32,11 +31,11 @@ function libraryTable(assignments: AssignmentSummary[]): string {
   const rows = assignments
     .map(
       (assignment) => `<tr>
-  <td><a href="/assignments/${e(assignment.id)}">${e(assignment.title)}</a><br><span class="small">Function assignment · active version ${assignment.versionNumber}</span></td>
+  <td><a href="/assignments/${escapeHtml(assignment.id)}">${escapeHtml(assignment.title)}</a><br><span class="small">Function assignment · active version ${assignment.versionNumber}</span></td>
   <td>${plural(assignment.criteriaCount, 'criterion', 'criteria')}</td>
   <td>${plural(assignment.testsCount, 'test')}</td>
-  <td class="compact small">${e(formatTimestamp(assignment.updatedAt))}</td>
-  <td class="compact"><a href="/assignments/${e(assignment.id)}">Open →</a></td>
+  <td class="compact small">${escapeHtml(formatTimestamp(assignment.updatedAt))}</td>
+  <td class="compact"><a href="/assignments/${escapeHtml(assignment.id)}">Open →</a></td>
 </tr>`,
     )
     .join('');
@@ -57,7 +56,7 @@ export interface AssignmentFormPageOptions {
   raw: RawConfig;
   baseVersionId?: string;
   errors?: ConfigErrors;
-  conflict?: { currentVersionId: string };
+  conflict?: boolean;
 }
 
 export function assignmentFormPage({
@@ -70,6 +69,7 @@ export function assignmentFormPage({
   conflict,
 }: AssignmentFormPageOptions): string {
   const isEdit = mode === 'edit';
+  const missingBase = isEdit && baseVersionId === undefined;
   const formTarget = isEdit ? `/assignments/${assignmentId}` : '/assignments';
   const criteria = raw.criteria.length === 0 ? [blankCriterion()] : raw.criteria;
   const tests = raw.tests.length === 0 ? [blankTest()] : raw.tests;
@@ -86,101 +86,74 @@ export function assignmentFormPage({
     <h1>${isEdit ? 'Edit function assignment' : 'Configure function assignment'}</h1>
     <p class="muted">Define the task, the ordered rubric, and the ordered tests. Each save creates immutable versions.</p>
   </div>
-  <button class="primary" type="submit" form="assignment-form">${isEdit ? 'Save changes' : 'Save assignment'}</button>
+  ${missingBase ? '' : `<button class="primary" type="submit" form="assignment-form">${isEdit ? 'Save changes' : 'Save assignment'}</button>`}
 </div>
-${conflict === undefined ? '' : conflictBanner(assignmentId)}
+${conflict ? conflictBanner(assignmentId) : ''}
+${missingBase ? `<div class="alert alert-warn" role="alert">
+  This draft has no base version and cannot be saved. Your input has been kept.
+  <a href="${escapeHtml(formTarget)}/edit" target="_blank" rel="noopener">Open the active version</a> in a new tab, then reapply your changes.
+</div>` : ''}
 ${hasErrors ? '<div class="alert alert-error" role="alert">Fix the highlighted fields and try again. Nothing was saved.</div>' : ''}
-${errors.form === undefined ? '' : `<div class="alert alert-error" role="alert">${e(errors.form)}</div>`}
-<form id="assignment-form" method="post" action="${formTarget}">
-  <input type="hidden" name="_csrf" value="${e(user.csrfToken)}">
-  ${isEdit && baseVersionId !== undefined ? `<input type="hidden" name="baseVersionId" value="${e(baseVersionId)}">` : ''}
+${errors.form === undefined ? '' : `<div class="alert alert-error" role="alert">${escapeHtml(errors.form)}</div>`}
+<form id="assignment-form" method="post" action="${escapeHtml(formTarget)}">
+  <input type="hidden" name="_csrf" value="${escapeHtml(user.csrfToken)}">
+  ${isEdit && baseVersionId !== undefined ? `<input type="hidden" name="baseVersionId" value="${escapeHtml(baseVersionId)}">` : ''}
   <div class="split">
     <div class="stack">
       <section class="panel pad fields" aria-label="Task details">
         <label class="wide${errors.title === undefined ? '' : ' has-error'}">Assignment title
-          <input name="title" value="${e(raw.title)}" maxlength="200" required>
+          <textarea name="title" rows="1" required>
+${escapeHtml(raw.title)}</textarea>
           ${fieldError(errors.title)}
         </label>
         <label class="wide${errors.description === undefined ? '' : ' has-error'}">Task description
-          <textarea name="description" maxlength="10000" required>${e(raw.description)}</textarea>
+          <textarea name="description" required>
+${escapeHtml(raw.description)}</textarea>
           ${fieldError(errors.description)}
         </label>
         <label class="wide${errors.entryPoint === undefined ? '' : ' has-error'}">Python entry point
-          <input name="entryPoint" value="${e(raw.entryPoint)}" maxlength="128" placeholder="first_positive" required>
+          <input name="entryPoint" value="${escapeHtml(raw.entryPoint)}" placeholder="first_positive" required>
           <span class="hint">The function name only, such as <code>first_positive</code>. Do not enter a signature or expression.</span>
           ${fieldError(errors.entryPoint)}
         </label>
       </section>
       <section class="panel" aria-label="Rubric criteria">
         <div class="panel-top"><h2>Rubric</h2><button type="button" data-add="criteria">Add criterion</button></div>
-        ${errors.criteria?.message === undefined ? '' : `<div class="pad"><p class="field-error">${e(errors.criteria.message)}</p></div>`}
+        ${errors.criteria?.message === undefined ? '' : `<div class="pad"><p class="field-error">${escapeHtml(errors.criteria.message)}</p></div>`}
         <div data-rows="criteria">
-          ${criteria.map((criterion, index) => criterionRow(criterion, index, errors)).join('')}
+          ${criteria.map((criterion, index) => criterionRow(criterion, index, errors.criteria?.rows[index] ?? {})).join('')}
         </div>
-        <div class="pad"><p class="hint">Criteria keep the order shown. Use the same ID when revising a criterion; renaming an ID adds a new criterion and leaves the historical one untouched.</p></div>
+        <div class="pad"><p class="hint">Criteria keep the order shown. Use the same ID when revising a criterion; renaming an ID adds a new criterion and leaves the historical one untouched. Use up to ${MAX_ROWS_PER_LIST} criteria.</p></div>
       </section>
     </div>
     <div class="stack">
       <section class="panel" aria-label="Function tests">
         <div class="panel-top"><h2>Tests</h2><button type="button" data-add="tests">Add test</button></div>
-        ${errors.tests?.message === undefined ? '' : `<div class="pad"><p class="field-error">${e(errors.tests.message)}</p></div>`}
+        ${errors.tests?.message === undefined ? '' : `<div class="pad"><p class="field-error">${escapeHtml(errors.tests.message)}</p></div>`}
         <div data-rows="tests">
-          ${tests.map((test, index) => testRow(test, index, errors)).join('')}
+          ${tests.map((test, index) => testRow(test, index, errors.tests?.rows[index] ?? {})).join('')}
         </div>
-        <div class="pad"><p class="hint">Arguments are a JSON array: <code>[]</code> supplies none, <code>[4, -1]</code> supplies two, and <code>[[4, -1]]</code> supplies one list argument. Expected return is a separate JSON value; <code>null</code> means Python <code>None</code>.</p></div>
+        <div class="pad"><p class="hint">Arguments are a JSON array: <code>[]</code> supplies none, <code>[4, -1]</code> supplies two, and <code>[[4, -1]]</code> supplies one list argument. Expected return is a separate JSON value; <code>null</code> means Python <code>None</code>. Use up to ${MAX_ROWS_PER_LIST} tests and ${MAX_JSON_DEPTH} levels of JSON nesting.</p></div>
       </section>
       <section class="panel pad">
         <h2>Save behavior</h2>
         <p class="muted small">Saving unchanged content creates no version. If another researcher saves first, this form will keep your edits and explain the conflict instead of overwriting their version.</p>
+        <p class="hint">Saved text and compact JSON together can use up to ${MAX_CONFIG_MIB} MiB.</p>
         <div class="actions end">
-          <a class="button" href="${isEdit ? `/assignments/${assignmentId}` : '/assignments'}">Cancel</a>
+          <a class="button" href="${escapeHtml(formTarget)}">Cancel</a>
         </div>
       </section>
     </div>
   </div>
 </form>
-${criteriaTemplate()}
-${testTemplate()}
-<script>
-(() => {
-  const nextIndex = (container, list) => {
-    let max = -1;
-    container.querySelectorAll('input[name]').forEach((input) => {
-      const match = new RegExp('^' + list + '\\\\[(\\\\d+)\\\\]').exec(input.name);
-      if (match) max = Math.max(max, Number(match[1]));
-    });
-    return max + 1;
-  };
-  document.querySelectorAll('[data-add]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const list = button.dataset.add;
-      const container = document.querySelector('[data-rows="' + list + '"]');
-      const template = document.getElementById(list + '-template');
-      if (!container || !template) return;
-      const index = nextIndex(container, list);
-      const row = template.content.firstElementChild.cloneNode(true);
-      row.querySelectorAll('[name]').forEach((input) => {
-        input.name = input.name.replaceAll('__INDEX__', String(index));
-      });
-      container.appendChild(row);
-      const first = row.querySelector('input');
-      if (first) first.focus();
-    });
-  });
-  document.addEventListener('click', (event) => {
-    const button = event.target.closest('[data-remove]');
-    if (!button) return;
-    const row = button.closest('[data-row]');
-    if (row) row.remove();
-  });
-})();
-</script>`;
+<template id="criteria-template">${criterionRow(blankCriterion(), '__INDEX__', {})}</template>
+<template id="tests-template">${testRow(blankTest(), '__INDEX__', {})}</template>
+<script>${repeatableRowsScript}</script>`;
 
   return shell({
     title: isEdit ? 'Edit assignment' : 'Configure assignment',
     user,
     body,
-    activeNav: 'assignments',
   });
 }
 
@@ -188,29 +161,30 @@ function conflictBanner(assignmentId: string): string {
   return `<div class="alert alert-warn" role="alert">
   <strong>A newer version of this assignment was saved while you were editing.</strong>
   Your unsaved changes are still in this form and have not been overwritten. Nothing was saved.
-  <a href="/assignments/${e(assignmentId)}" target="_blank" rel="noopener">Open the latest version</a> in a new tab to review it, then reapply your changes.
+  <a href="/assignments/${escapeHtml(assignmentId)}" target="_blank" rel="noopener">Open the latest version</a> in a new tab to review it, then reapply your changes.
 </div>`;
 }
 
 function criterionRow(
   criterion: { id: string; description: string; expectedBehavior: string },
-  index: number,
-  errors: ConfigErrors,
+  index: number | '__INDEX__',
+  rowErrors: Record<string, string>,
 ): string {
-  const rowErrors = errors.criteria?.rows[index] ?? {};
   return `<div class="row-card" data-row>
   <div class="row-head"><span class="row-title">Criterion</span><button type="button" class="link-button remove-row" data-remove>Remove</button></div>
   <div class="row-grid">
     <label>ID
-      <input name="criteria[${index}][id]" value="${e(criterion.id)}" maxlength="64" placeholder="r1">
+      <input name="criteria[${index}][id]" value="${escapeHtml(criterion.id)}" placeholder="r1">
       ${fieldError(rowErrors.id)}
     </label>
     <label>Description
-      <input name="criteria[${index}][description]" value="${e(criterion.description)}" maxlength="2000">
+      <textarea name="criteria[${index}][description]">
+${escapeHtml(criterion.description)}</textarea>
       ${fieldError(rowErrors.description)}
     </label>
     <label>Expected behavior
-      <input name="criteria[${index}][expectedBehavior]" value="${e(criterion.expectedBehavior)}" maxlength="2000">
+      <textarea name="criteria[${index}][expectedBehavior]">
+${escapeHtml(criterion.expectedBehavior)}</textarea>
       ${fieldError(rowErrors.expectedBehavior)}
     </label>
   </div>
@@ -219,57 +193,32 @@ function criterionRow(
 
 function testRow(
   test: { id: string; arguments: string; expectedReturn: string },
-  index: number,
-  errors: ConfigErrors,
+  index: number | '__INDEX__',
+  rowErrors: Record<string, string>,
 ): string {
-  const rowErrors = errors.tests?.rows[index] ?? {};
   return `<div class="row-card" data-row>
   <div class="row-head"><span class="row-title">Test</span><button type="button" class="link-button remove-row" data-remove>Remove</button></div>
   <div class="row-grid tests">
     <label>ID
-      <input name="tests[${index}][id]" value="${e(test.id)}" maxlength="64" placeholder="t1">
+      <input name="tests[${index}][id]" value="${escapeHtml(test.id)}" placeholder="t1">
       ${fieldError(rowErrors.id)}
     </label>
     <label>Positional arguments (JSON array)
-      <input name="tests[${index}][arguments]" value="${e(test.arguments)}" maxlength="10000" placeholder="[[4, -1]]">
+      <textarea name="tests[${index}][arguments]" class="mono" placeholder="[[4, -1]]">
+${escapeHtml(test.arguments)}</textarea>
       ${fieldError(rowErrors.arguments)}
     </label>
     <label>Expected return (JSON value)
-      <input name="tests[${index}][expectedReturn]" value="${e(test.expectedReturn)}" maxlength="10000" placeholder="4">
+      <textarea name="tests[${index}][expectedReturn]" class="mono" placeholder="4">
+${escapeHtml(test.expectedReturn)}</textarea>
       ${fieldError(rowErrors.expectedReturn)}
     </label>
   </div>
 </div>`;
 }
 
-function criteriaTemplate(): string {
-  return `<template id="criteria-template">
-  <div class="row-card" data-row>
-    <div class="row-head"><span class="row-title">Criterion</span><button type="button" class="link-button remove-row" data-remove>Remove</button></div>
-    <div class="row-grid">
-      <label>ID<input name="criteria[__INDEX__][id]" maxlength="64" placeholder="r1"></label>
-      <label>Description<input name="criteria[__INDEX__][description]" maxlength="2000"></label>
-      <label>Expected behavior<input name="criteria[__INDEX__][expectedBehavior]" maxlength="2000"></label>
-    </div>
-  </div>
-</template>`;
-}
-
-function testTemplate(): string {
-  return `<template id="tests-template">
-  <div class="row-card" data-row>
-    <div class="row-head"><span class="row-title">Test</span><button type="button" class="link-button remove-row" data-remove>Remove</button></div>
-    <div class="row-grid tests">
-      <label>ID<input name="tests[__INDEX__][id]" maxlength="64" placeholder="t1"></label>
-      <label>Positional arguments (JSON array)<input name="tests[__INDEX__][arguments]" maxlength="10000" placeholder="[[4, -1]]"></label>
-      <label>Expected return (JSON value)<input name="tests[__INDEX__][expectedReturn]" maxlength="10000" placeholder="4"></label>
-    </div>
-  </div>
-</template>`;
-}
-
 function fieldError(message: string | undefined): string {
-  return message === undefined ? '' : `<p class="field-error">${e(message)}</p>`;
+  return message === undefined ? '' : `<p class="field-error">${escapeHtml(message)}</p>`;
 }
 
 function blankCriterion(): { id: string; description: string; expectedBehavior: string } {
@@ -293,57 +242,57 @@ export function assignmentDetailPage({
   notice,
   isActive = true,
 }: AssignmentDetailPageOptions): string {
-  const base = `/assignments/${version.assignmentId}`;
+  const base = escapeHtml(`/assignments/${version.assignmentId}`);
   const body = `<div class="head">
   <div>
-    <h1>${e(version.title)}</h1>
-    <p class="muted">Version ${version.versionNumber} · Function assignment · saved by ${e(version.createdBy.email)} on ${e(formatTimestamp(version.createdAt))}</p>
+    <h1>${escapeHtml(version.title)}</h1>
+    <p class="muted">Version ${version.versionNumber} · Function assignment · saved by ${escapeHtml(version.createdBy.email)} on ${escapeHtml(formatTimestamp(version.createdAt))}</p>
   </div>
   <div class="actions">
-    ${isActive ? `<a class="button primary" href="${base}/edit">Edit assignment</a>` : ''}
+    ${isActive ? `<a class="button primary" href="${base}/edit?version=${encodeURIComponent(version.id)}">Edit assignment</a>` : ''}
     <a class="button" href="${base}/history">Version history</a>
     <a class="button" href="/assignments">Library</a>
   </div>
 </div>
-${notice === undefined ? '' : `<div class="alert alert-ok" role="status">${e(notice)}</div>`}
+${notice === undefined ? '' : `<div class="alert alert-ok" role="status">${escapeHtml(notice)}</div>`}
 ${isActive ? '<div class="banner ok"><span>This is the active version.</span><a href="' + base + '/history">View saved versions</a></div>' : '<div class="banner"><span>This is a read-only historical version. It is not the active version.</span><a href="' + base + '">Open the active version</a></div>'}
 <div class="meta-grid end">
-  <div class="metric"><span class="small">Rubric</span><strong>${plural(version.criteria.length, 'criterion', 'criteria')}</strong><span class="small mono">${e(version.rubricVersionId)}</span></div>
-  <div class="metric"><span class="small">Tests</span><strong>${plural(version.tests.length, 'test')}</strong><span class="small mono">${e(version.testSuiteVersionId)}</span></div>
-  <div class="metric"><span class="small">Entry point</span><strong class="mono">${e(version.entryPoint)}</strong><span class="small">Returns a value</span></div>
+  <div class="metric"><span class="small">Rubric</span><strong>${plural(version.criteria.length, 'criterion', 'criteria')}</strong><span class="small mono">${escapeHtml(version.rubricVersionId)}</span></div>
+  <div class="metric"><span class="small">Tests</span><strong>${plural(version.tests.length, 'test')}</strong><span class="small mono">${escapeHtml(version.testSuiteVersionId)}</span></div>
+  <div class="metric"><span class="small">Entry point</span><strong class="mono">${escapeHtml(version.entryPoint)}</strong><span class="small">Returns a value</span></div>
 </div>
 <div class="stack end">
   <section class="panel pad">
     <h2>Task description</h2>
-    <p class="prewrap">${e(version.description)}</p>
+    <p class="prewrap">${escapeHtml(version.description)}</p>
   </section>
   <section class="panel">
-    <div class="panel-top"><h2>Rubric · version ${e(shortId(version.rubricVersionId))}</h2><span class="tag">${plural(version.criteria.length, 'criterion', 'criteria')}</span></div>
+    <div class="panel-top"><h2>Rubric · version ${escapeHtml(shortId(version.rubricVersionId))}</h2><span class="tag">${plural(version.criteria.length, 'criterion', 'criteria')}</span></div>
     <div class="table-wrap"><table>
       <thead><tr><th>#</th><th>ID</th><th>Description</th><th>Expected behavior</th></tr></thead>
       <tbody>${version.criteria
         .map(
           (criterion, index) => `<tr>
         <td>${index + 1}</td>
-        <td><code>${e(criterion.id)}</code></td>
-        <td>${e(criterion.description)}</td>
-        <td>${e(criterion.expectedBehavior)}</td>
+        <td><code>${escapeHtml(criterion.id)}</code></td>
+        <td>${escapeHtml(criterion.description)}</td>
+        <td>${escapeHtml(criterion.expectedBehavior)}</td>
       </tr>`,
         )
         .join('')}</tbody>
     </table></div>
   </section>
   <section class="panel">
-    <div class="panel-top"><h2>Tests · version ${e(shortId(version.testSuiteVersionId))}</h2><span class="tag">function-value-v1</span></div>
+    <div class="panel-top"><h2>Tests · version ${escapeHtml(shortId(version.testSuiteVersionId))}</h2><span class="tag">${COMPARISON_RULE}</span></div>
     <div class="table-wrap"><table>
       <thead><tr><th>#</th><th>ID</th><th>Positional arguments</th><th>Expected return</th></tr></thead>
       <tbody>${version.tests
         .map(
           (test, index) => `<tr>
         <td>${index + 1}</td>
-        <td><code>${e(test.id)}</code></td>
-        <td><code>${e(formatJsonForDisplay(parseJsonValue(test.argumentsJson)))}</code></td>
-        <td><code>${e(formatJsonForDisplay(parseJsonValue(test.expectedReturnJson)))}</code></td>
+        <td><code>${escapeHtml(test.id)}</code></td>
+        <td><code>${escapeHtml(formatJsonForDisplay(parseJsonValue(test.argumentsJson)))}</code></td>
+        <td><code>${escapeHtml(formatJsonForDisplay(parseJsonValue(test.expectedReturnJson)))}</code></td>
       </tr>`,
         )
         .join('')}</tbody>
@@ -352,10 +301,10 @@ ${isActive ? '<div class="banner ok"><span>This is the active version.</span><a 
   <section class="panel pad">
     <h2>Version references</h2>
     <div class="fields">
-      <label>Rubric version ID<input class="mono" value="${e(version.rubricVersionId)}" readonly></label>
-      <label>Test suite version ID<input class="mono" value="${e(version.testSuiteVersionId)}" readonly></label>
-      <label>Assignment version ID<input class="mono" value="${e(version.id)}" readonly></label>
-      <label>Comparison rule<input value="function-value-v1" readonly></label>
+      <label>Rubric version ID<input class="mono" value="${escapeHtml(version.rubricVersionId)}" readonly></label>
+      <label>Test suite version ID<input class="mono" value="${escapeHtml(version.testSuiteVersionId)}" readonly></label>
+      <label>Assignment version ID<input class="mono" value="${escapeHtml(version.id)}" readonly></label>
+      <label>Comparison rule<input value="${COMPARISON_RULE}" readonly></label>
     </div>
   </section>
 </div>`;
@@ -364,7 +313,6 @@ ${isActive ? '<div class="banner ok"><span>This is the active version.</span><a 
     title: version.title,
     user,
     body,
-    activeNav: 'assignments',
   });
 }
 
@@ -376,10 +324,10 @@ export function historyPage(
   const rows = versions
     .map(
       (version) => `<tr>
-  <td><a href="/assignments/${e(assignmentId)}/versions/${e(version.id)}">Version ${version.versionNumber}</a></td>
-  <td>${e(version.title)}</td>
-  <td>${e(version.createdBy.email)}</td>
-  <td class="compact small">${e(formatTimestamp(version.createdAt))}</td>
+  <td><a href="/assignments/${escapeHtml(assignmentId)}/versions/${escapeHtml(version.id)}">Version ${version.versionNumber}</a></td>
+  <td>${escapeHtml(version.title)}</td>
+  <td>${escapeHtml(version.createdBy.email)}</td>
+  <td class="compact small">${escapeHtml(formatTimestamp(version.createdAt))}</td>
   <td>${version.isActive ? '<span class="tag ok">Active</span>' : '<span class="tag">Historical</span>'}</td>
 </tr>`,
     )
@@ -387,7 +335,7 @@ export function historyPage(
 
   const body = `<div class="head">
   <div><h1>Version history</h1><p class="muted">Newest first. Historical versions are read-only and keep their exact rubric and tests.</p></div>
-  <div class="actions"><a class="button" href="/assignments/${e(assignmentId)}">Open active version</a><a class="button" href="/assignments">Library</a></div>
+  <div class="actions"><a class="button" href="/assignments/${escapeHtml(assignmentId)}">Open active version</a><a class="button" href="/assignments">Library</a></div>
 </div>
 <section class="panel">
   <div class="panel-top"><h2>Saved versions</h2><span class="tag">${plural(versions.length, 'version')}</span></div>
@@ -397,7 +345,7 @@ export function historyPage(
   </table></div>
 </section>`;
 
-  return shell({ title: 'Version history', user, body, activeNav: 'assignments' });
+  return shell({ title: 'Version history', user, body });
 }
 
 export function formatTimestamp(iso: string): string {

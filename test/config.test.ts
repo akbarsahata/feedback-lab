@@ -89,7 +89,7 @@ describe('validateConfig', () => {
     expect(result.errors.entryPoint).toMatch(/function name|entry point/i);
   });
 
-  it.each(['1abc', 'first-positive', 'first positive', 'def first_positive():', 'café'])(
+  it.each(['1abc', 'first-positive', 'first positive', 'def first_positive():'])(
     'rejects invalid entry point %s',
     (entryPoint) => {
       const result = validateConfig(validRaw({ entryPoint }));
@@ -237,10 +237,7 @@ describe('validateConfig', () => {
     }
   });
 
-  it('enforces field lengths and row counts', () => {
-    const longTitle = validateConfig(validRaw({ title: 'x'.repeat(201) }));
-    expect(longTitle.ok).toBe(false);
-
+  it('enforces the maximum number of nonblank rows', () => {
     const tooMany = validateConfig(
       validRaw({
         criteria: Array.from({ length: 101 }, (_, index) => ({

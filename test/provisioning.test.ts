@@ -1,28 +1,19 @@
 import { SELF } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import {
-  generatePassword,
-  hashPassword as scriptHashPassword,
-  verifyPassword as scriptVerifyPassword,
-} from '../scripts/password.mjs';
-import { hashPassword, verifyPassword } from '../src/password';
-import { BASE_URL, extractCookie, seedUser } from './helpers';
+import { generatePassword, hashPassword, verifyPassword } from '../src/password.mjs';
+import { BASE_URL, extractCookie, seedUser, testClientIp } from './helpers';
 
 describe('provisioning password format', () => {
   it('produces the documented format', async () => {
-    const hash = await scriptHashPassword('provisioned-password');
+    const hash = await hashPassword('provisioned-password');
     expect(hash).toMatch(/^pbkdf2-sha256\$100000\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$/);
     expect(hash.split('$')).toHaveLength(4);
   });
 
-  it('is compatible in both directions with the application verifier', async () => {
-    const scriptHash = await scriptHashPassword('from-the-script');
-    expect(await verifyPassword('from-the-script', scriptHash)).toBe(true);
-    expect(await verifyPassword('wrong', scriptHash)).toBe(false);
-
-    const appHash = await hashPassword('from-the-app');
-    expect(await scriptVerifyPassword('from-the-app', appHash)).toBe(true);
-    expect(await scriptVerifyPassword('wrong', appHash)).toBe(false);
+  it('verifies a documented-format hash computed independently with Node crypto', async () => {
+    const stored = 'pbkdf2-sha256$100000$AAAAAAAAAAAAAAAAAAAAAA==$gLAFoXhxZfZ4bsh0seP04mxnxgmcwkqu65tEp1SQLMM=';
+    expect(await verifyPassword('provisioning-vector', stored)).toBe(true);
+    expect(await verifyPassword('wrong', stored)).toBe(false);
   });
 
   it('generates a memorable 20-character password with no ambiguous characters', () => {
@@ -36,7 +27,7 @@ describe('provisioning password format', () => {
   it('lets a user provisioned with the script hash sign in through the app', async () => {
     const email = `provisioned-${crypto.randomUUID()}@example.test`;
     const password = generatePassword(20);
-    const passwordHash = await scriptHashPassword(password);
+    const passwordHash = await hashPassword(password);
     const user = await seedUser('researcher', { email, password });
 
     // Replace the helper's hash with the script-generated hash to exercise the
@@ -49,7 +40,8 @@ describe('provisioning password format', () => {
     const response = await SELF.fetch(`${BASE_URL}/sign-in`, {
       method: 'POST',
       headers: {
-        'content-type': 'application/x-www-form-urlencoded',
+      'content-type': 'application/x-www-form-urlencoded',
+      'cf-connecting-ip': testClientIp(),
         origin: BASE_URL,
       },
       body: new URLSearchParams({ email, password }).toString(),
@@ -69,6 +61,6 @@ describe('provisioning password format', () => {
         'pbkdf2-sha256$100000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
       ),
     ).toBe(false);
-    expect(await scriptVerifyPassword('x', 'pbkdf2-sha256$999999999$abc$def')).toBe(false);
+    expect(await verifyPassword('x', 'pbkdf2-sha256$999999999$abc$def')).toBe(false);
   });
 });
