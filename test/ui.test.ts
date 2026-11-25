@@ -1,0 +1,493 @@
+import { SELF } from 'cloudflare:test';
+import { describe, expect, it } from 'vitest';
+import { countRows, postForm, postJson, seedUser, signIn, type SignedIn } from './helpers';
+import { assignmentConfig, type SerializedVersion } from './fixtures';
+import type { RawConfig } from '../src/config';
+
+const BASE_URL = 'https://feedback-lab.test';
+
+function formFields(
+  config: RawConfig,
+  baseVersionId?: string,
+): Record<string, string> {
+  const fields: Record<string, string> = {
+    title: config.title,
+    description: config.description,
+    entryPoint: config.entryPoint,
+  };
+  if (baseVersionId !== undefined) {
+    fields.baseVersionId = baseVersionId;
+  }
+  config.criteria.forEach((criterion, index) => {
+    fields[`criteria[${index}][id]`] = criterion.id;
+    fields[`criteria[${index}][description]`] = criterion.description;
+    fields[`criteria[${index}][expectedBehavior]`] = criterion.expectedBehavior;
+  });
+  config.tests.forEach((test, index) => {
+    fields[`tests[${index}][id]`] = test.id;
+    fields[`tests[${index}][arguments]`] = test.arguments;
+    fields[`tests[${index}][expectedReturn]`] = test.expectedReturn;
+  });
+  return fields;
+}
+
+async function get(path: string, session?: SignedIn): Promise<Response> {
+  return SELF.fetch(`${BASE_URL}${path}`, {
+    headers: session === undefined ? {} : { cookie: session.cookie },
+    redirect: 'manual',
+  });
+}
+
+async function createViaApi(
+  session: SignedIn,
+  config = assignmentConfig(),
+): Promise<SerializedVersion> {
+  const { response, body } = await postJson('/api/assignments', { config }, session);
+  expect(response.status).toBe(201);
+  return body.version as SerializedVersion;
+}
+
+async function createViaHtml(
+  session: SignedIn,
+  config = assignmentConfig(),
+): Promise<string> {
+  const response = await postForm('/assignments', formFields(config), session);
+  expect(response.status).toBe(303);
+  const location = response.headers.get('location') ?? '';
+  expect(location).toMatch(/^\/assignments\/[0-9a-f-]{36}$/);
+  return location.slice('/assignments/'.length);
+}
+
+describe('HTML access boundary', () => {
+  it('redirects signed-out users before they can read any assignment page', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createViaApi(researcher);
+    const base = `/assignments/${version.assignmentId}`;
+
+    for (const path of [
+      '/assignments',
+      '/assignments/new',
+      base,
+      `${base}/edit`,
+      `${base}/history`,
+      `${base}/versions/${version.id}`,
+    ]) {
+      const response = await get(path);
+      expect(response.status).toBe(303);
+      expect(response.headers.get('location')).toContain('/sign-in?next=');
+      const body = await response.text();
+      expect(body).not.toContain(version.title);
+    }
+  });
+
+  it('denies signed-in members without exposing assignment data', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createViaApi(researcher);
+    const member = await signIn(await seedUser('member'));
+    const base = `/assignments/${version.assignmentId}`;
+
+    for (const path of [
+      '/assignments',
+      '/assignments/new',
+      base,
+      `${base}/edit`,
+      `${base}/history`,
+      `${base}/versions/${version.id}`,
+    ]) {
+      const response = await get(path, member);
+      expect(response.status).toBe(403);
+      const body = await response.text();
+      expect(body).toContain('Researcher access required');
+      expect(body).not.toContain(version.title);
+    }
+
+    const write = await postForm('/assignments', formFields(assignmentConfig()), member);
+    expect(write.status).toBe(403);
+    const edit = await postForm(
+      base,
+      formFields(assignmentConfig({ title: 'Member edit' }), version.id),
+      member,
+    );
+    expect(edit.status).toBe(403);
+    expect(await countRows('assignments')).toBe(1);
+    expect(await countRows('assignment_versions')).toBe(1);
+  });
+
+  it('denies signed-out and member form writes', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createViaApi(researcher);
+    const base = `/assignments/${version.assignmentId}`;
+
+    const signedOut = await SELF.fetch(`${BASE_URL}/assignments`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        origin: BASE_URL,
+      },
+      body: new URLSearchParams(formFields(assignmentConfig())).toString(),
+      redirect: 'manual',
+    });
+    expect(signedOut.status).toBe(303);
+
+    const member = await signIn(await seedUser('member'));
+    const memberWrite = await postForm(
+      `${base}`,
+      formFields(assignmentConfig({ title: 'Member edit' }), version.id),
+      member,
+    );
+    expect(memberWrite.status).toBe(403);
+    expect(await countRows('assignment_versions')).toBe(1);
+  });
+
+  it('rejects form writes without a valid CSRF token', async () => {
+    const researcher = await signIn(await seedUser());
+    const response = await postForm('/assignments', formFields(assignmentConfig()), researcher, {
+      includeCsrf: false,
+    });
+    expect(response.status).toBe(403);
+    expect(await countRows('assignments')).toBe(0);
+
+    const version = await createViaApi(researcher);
+    const base = `/assignments/${version.assignmentId}`;
+    const edit = await postForm(
+      base,
+      formFields(assignmentConfig({ title: 'Unsaved' }), version.id),
+      researcher,
+      { includeCsrf: false },
+    );
+    expect(edit.status).toBe(403);
+    expect(await countRows('assignment_versions')).toBe(1);
+  });
+});
+
+describe('library', () => {
+  it('redirects the site root to the library', async () => {
+    const response = await get('/');
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toBe('/assignments');
+  });
+
+  it('shows a clear empty state with a create action', async () => {
+    const researcher = await signIn(await seedUser());
+    const response = await get('/assignments', researcher);
+    const html = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(html).toContain('No assignments yet');
+    expect(html).toContain('href="/assignments/new"');
+  });
+
+  it('lists the active title with rubric and test counts', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createViaApi(researcher);
+
+    const response = await get('/assignments', researcher);
+    const html = await response.text();
+    expect(html).toContain(version.title);
+    expect(html).toContain('2 criteria');
+    expect(html).toContain('2 tests');
+    expect(html).toContain(`/assignments/${version.assignmentId}`);
+  });
+});
+
+describe('create with the HTML form', () => {
+  it('renders the form with repeatable rows, CSRF, and the examples', async () => {
+    const researcher = await signIn(await seedUser());
+    const response = await get('/assignments/new', researcher);
+    const html = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(html).toContain('name="_csrf"');
+    expect(html).toContain('name="criteria[0][id]"');
+    expect(html).toContain('name="tests[0][arguments]"');
+    expect(html).toContain('[[4, -1]]');
+    expect(html).toContain('data-add="criteria"');
+    expect(html).toContain('data-add="tests"');
+  });
+
+  it('creates an assignment and reopens its saved values and order', async () => {
+    const researcher = await signIn(await seedUser());
+    const assignmentId = await createViaHtml(researcher);
+
+    const response = await get(`/assignments/${assignmentId}`, researcher);
+    const html = await response.text();
+    expect(response.status).toBe(200);
+    expect(html).toContain('First positive value');
+    expect(html).toContain('first_positive');
+    expect(html).toContain('Version 1');
+    expect(html).toContain('r1');
+    expect(html).toContain('r2');
+    expect(html.indexOf('Iteration order')).toBeLessThan(html.indexOf('No positive value'));
+    expect(html).toContain('list-argument');
+    expect(html).toContain('empty-list');
+    expect(html).toContain('[[4, -1]]');
+    expect(html).toContain('null');
+  });
+
+  it('escapes researcher-entered HTML', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createViaApi(
+      researcher,
+      assignmentConfig({
+        title: '<script>alert("x")</script>',
+        description: 'Use 1 < 2 & 3 > 2.',
+      }),
+    );
+
+    const response = await get(`/assignments/${version.assignmentId}`, researcher);
+    const html = await response.text();
+    expect(html).not.toContain('<script>alert("x")</script>');
+    expect(html).toContain('&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;');
+    expect(html).toContain('Use 1 &lt; 2 &amp; 3 &gt; 2.');
+  });
+});
+
+describe('validation errors in the HTML form', () => {
+  it('identifies fields and rows, preserves input, and writes nothing', async () => {
+    const researcher = await signIn(await seedUser());
+    const invalid = assignmentConfig({
+      title: '',
+      entryPoint: 'class',
+      criteria: [
+        { id: 'r1', description: 'Keep this description', expectedBehavior: 'Behaves' },
+      ],
+      tests: [
+        { id: 't1', arguments: '[1,]', expectedReturn: '' },
+        { id: 't1', arguments: '{"a": 1, "a": 2}', expectedReturn: '1e999' },
+      ],
+    });
+
+    const response = await postForm('/assignments', formFields(invalid), researcher);
+    const html = await response.text();
+
+    expect(response.status).toBe(422);
+    expect(html).toContain('Fix the highlighted fields');
+    expect(html).toContain('Enter a title.');
+    expect(html).toContain('Python keyword');
+    expect(html).toContain('Keep this description');
+    expect(html).toContain('Enter arguments as a JSON array');
+    expect(html).toContain('already used in this test suite');
+    expect(html).toContain('Invalid JSON');
+    expect(html).toContain('value="[1,]"');
+    expect(html).toContain('value="1e999"');
+    expect(await countRows('assignments')).toBe(0);
+    expect(await countRows('assignment_versions')).toBe(0);
+    expect(await countRows('rubric_versions')).toBe(0);
+    expect(await countRows('test_suite_versions')).toBe(0);
+  });
+
+  it('does not advance the active version on an invalid revision', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createViaApi(researcher);
+
+    const response = await postForm(
+      `/assignments/${version.assignmentId}`,
+      formFields(
+        assignmentConfig({ entryPoint: 'not a function' }),
+        version.id,
+      ),
+      researcher,
+    );
+    const html = await response.text();
+
+    expect(response.status).toBe(422);
+    expect(html).toContain('Python identifier');
+    expect(await countRows('assignment_versions')).toBe(1);
+    expect(await countRows('rubric_versions')).toBe(1);
+    expect(await countRows('test_suite_versions')).toBe(1);
+  });
+});
+
+describe('edit and history', () => {
+  it('prefills the edit form with the active version and its base ID', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createViaApi(researcher);
+
+    const response = await get(`/assignments/${version.assignmentId}/edit`, researcher);
+    const html = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(html).toContain('value="First positive value"');
+    expect(html).toContain('value="first_positive"');
+    expect(html).toContain(`value="${version.id}"`);
+    expect(html).toContain('value="[[4, -1]]"');
+    expect(html).toContain('value="null"');
+    expect(html).toContain('value="r1"');
+  });
+
+  it('saves metadata-only changes, reuses children, and shows history', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createViaApi(researcher);
+    const base = `/assignments/${version.assignmentId}`;
+
+    const response = await postForm(
+      base,
+      formFields(assignmentConfig({ title: 'Renamed assignment' }), version.id),
+      researcher,
+    );
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toBe(base);
+
+    const detail = await (await get(base, researcher)).text();
+    expect(detail).toContain('Renamed assignment');
+    expect(detail).toContain('Version 2');
+    expect(detail).toContain(version.rubricVersionId);
+    expect(detail).toContain(version.testSuiteVersionId);
+
+    const history = await (await get(`${base}/history`, researcher)).text();
+    expect(history).toContain('Version 2');
+    expect(history).toContain('Version 1');
+    expect(history.indexOf('Version 2')).toBeLessThan(history.indexOf('Version 1'));
+    expect(history).toContain('Active');
+  });
+
+  it('reports a no-op save without creating a version', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createViaApi(researcher);
+    const base = `/assignments/${version.assignmentId}`;
+
+    const response = await postForm(
+      base,
+      formFields(assignmentConfig(), version.id),
+      researcher,
+    );
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toBe(`${base}?notice=unchanged`);
+
+    const detail = await (await get(`${base}?notice=unchanged`, researcher)).text();
+    expect(detail).toContain('No changes to save');
+    expect(detail).toContain('Version 1');
+    expect(await countRows('assignment_versions')).toBe(1);
+  });
+
+  it('opens an exact historical version read-only with its original values', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createViaApi(researcher);
+    const base = `/assignments/${version.assignmentId}`;
+
+    await postForm(
+      base,
+      formFields(assignmentConfig({ title: 'Later title' }), version.id),
+      researcher,
+    );
+
+    const response = await get(`${base}/versions/${version.id}`, researcher);
+    const html = await response.text();
+    expect(response.status).toBe(200);
+    expect(html).toContain('First positive value');
+    expect(html).toContain('not the active version');
+    expect(html).toContain(version.rubricVersionId);
+    expect(html).toContain(version.testSuiteVersionId);
+    expect(html).toContain('[[4, -1]]');
+    expect(html).not.toContain('action="/assignments/' + version.assignmentId + '"');
+    expect(html).not.toContain('>Edit assignment<');
+    expect(html).not.toContain('Later title');
+  });
+
+  it('shows the active version as active and offers an edit action', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createViaApi(researcher);
+    const base = `/assignments/${version.assignmentId}`;
+
+    const html = await (await get(`${base}/versions/${version.id}`, researcher)).text();
+    expect(html).toContain('This is the active version');
+    expect(html).toContain(`href="${base}/edit"`);
+  });
+
+  it('does not allow historical configurations to be changed through their route', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createViaApi(researcher);
+    const base = `/assignments/${version.assignmentId}`;
+
+    const response = await postForm(
+      `${base}/versions/${version.id}`,
+      formFields(assignmentConfig({ title: 'Rewrite history' }), version.id),
+      researcher,
+    );
+    expect(response.status).toBe(405);
+    expect(await countRows('assignment_versions')).toBe(1);
+
+    const exact = await (await get(`${base}/versions/${version.id}`, researcher)).text();
+    expect(exact).toContain('First positive value');
+    expect(exact).not.toContain('Rewrite history');
+  });
+
+  it('lets a second researcher read and revise the same assignment', async () => {
+    const researcherA = await signIn(await seedUser());
+    const researcherB = await signIn(await seedUser());
+    const version = await createViaApi(researcherA);
+    const base = `/assignments/${version.assignmentId}`;
+
+    const read = await get(base, researcherB);
+    expect(read.status).toBe(200);
+    expect(await read.text()).toContain('First positive value');
+
+    const save = await postForm(
+      base,
+      formFields(assignmentConfig({ title: 'Revised by the second researcher' }), version.id),
+      researcherB,
+    );
+    expect(save.status).toBe(303);
+
+    const detail = await (await get(base, researcherA)).text();
+    expect(detail).toContain('Revised by the second researcher');
+    expect(detail).toContain('Version 2');
+
+    const history = await (await get(`${base}/history`, researcherA)).text();
+    expect(history).toContain(researcherB.user.email);
+  });
+
+  it('returns 404 for missing assignments and versions', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createViaApi(researcher);
+
+    const missingAssignment = await get(`/assignments/${crypto.randomUUID()}`, researcher);
+    expect(missingAssignment.status).toBe(404);
+
+    const missingVersion = await get(
+      `/assignments/${version.assignmentId}/versions/${crypto.randomUUID()}`,
+      researcher,
+    );
+    expect(missingVersion.status).toBe(404);
+  });
+});
+
+describe('stale HTML saves', () => {
+  it('explains the conflict, keeps edits, and leaves the newer version active', async () => {
+    const researcherA = await signIn(await seedUser());
+    const researcherB = await signIn(await seedUser());
+    const version = await createViaApi(researcherA);
+    const base = `/assignments/${version.assignmentId}`;
+
+    const first = await postForm(
+      base,
+      formFields(assignmentConfig({ title: 'Newer title' }), version.id),
+      researcherA,
+    );
+    expect(first.status).toBe(303);
+
+    const stale = await postForm(
+      base,
+      formFields(assignmentConfig({ title: 'My stale edit' }), version.id),
+      researcherB,
+    );
+    const html = await stale.text();
+
+    expect(stale.status).toBe(409);
+    expect(html).toContain('newer version');
+    expect(html).toContain('My stale edit');
+    expect(html).toContain(`value="${version.id}"`);
+    expect(html).toContain(`href="${base}"`);
+    expect(html).toContain('Open the latest version');
+
+    const versionsResponse = await get(`${base}/history`, researcherB);
+    const history = await versionsResponse.text();
+    expect(history).toContain('Newer title');
+    expect(history).not.toContain('My stale edit');
+    expect(await countRows('assignment_versions')).toBe(2);
+
+    const active = await (await get(base, researcherB)).text();
+    expect(active).toContain('Newer title');
+    expect(active).toContain('Version 2');
+  });
+});

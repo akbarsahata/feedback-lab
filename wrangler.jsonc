@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "feedback-lab",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-20",
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "feedback-lab",
+      // Replace with the ID returned by `npx wrangler d1 create feedback-lab`
+      // before deploying. Local development ignores this value.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
