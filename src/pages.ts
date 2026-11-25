@@ -187,7 +187,7 @@ function conflictBanner(assignmentId: string): string {
   return `<div class="alert alert-warn" role="alert">
   <strong>A newer version of this assignment was saved while you were editing.</strong>
   Your unsaved changes are still in this form and have not been overwritten. Nothing was saved.
-  <a href="/assignments/${e(assignmentId)}">Open the latest version</a> to review it, then reapply your changes.
+  <a href="/assignments/${e(assignmentId)}" target="_blank" rel="noopener">Open the latest version</a> in a new tab to review it, then reapply your changes.
 </div>`;
 }
 

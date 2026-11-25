@@ -140,7 +140,7 @@ async function reviseHandler(
       throw new InvalidRequestError('baseVersionId is required.');
     }
     baseVersionId = base;
-    config = readConfig(body.config ?? body);
+    config = readConfig(configValue(body));
   } catch (error) {
     return invalidRequest(error);
   }
@@ -188,7 +188,11 @@ function checkWriteRequest(request: Request, session: SessionUser): Response | n
 
 async function readConfigBody(request: Request): Promise<RawConfig> {
   const body = await readJsonObject(request);
-  return readConfig(body.config ?? body);
+  return readConfig(configValue(body));
+}
+
+function configValue(body: Record<string, unknown>): unknown {
+  return Object.hasOwn(body, 'config') ? body.config : body;
 }
 
 async function readJsonObject(request: Request): Promise<Record<string, unknown>> {

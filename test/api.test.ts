@@ -62,20 +62,54 @@ describe('API access boundary', () => {
     expect(await countRows('assignments')).toBe(0);
   });
 
-  it('denies access to missing and existing assignment routes before lookup', async () => {
+  it('denies signed-out and member callers on every assignment API route', async () => {
     const researcher = await signIn(await seedUser());
     const { version } = await createAssignment(researcher);
-    const signedOut = await apiFetch(`/api/assignments/${version.assignmentId}/versions/${version.id}`);
-    expect(signedOut.status).toBe(401);
-    expect((await signedOut.text()).includes(version.title)).toBe(false);
-
+    const base = `/api/assignments/${version.assignmentId}`;
+    const reads = [
+      '/api/assignments',
+      base,
+      `${base}/versions`,
+      `${base}/versions/${version.id}`,
+    ];
     const member = await signIn(await seedUser('member'));
-    const memberRead = await apiJson(
-      `/api/assignments/${version.assignmentId}/versions/${version.id}`,
-      { session: member },
-    );
-    expect(memberRead.response.status).toBe(403);
-    expect(JSON.stringify(memberRead.body)).not.toContain(version.title);
+
+    for (const path of reads) {
+      const signedOut = await apiFetch(path);
+      expect(signedOut.status).toBe(401);
+      expect((await signedOut.text()).includes(version.title)).toBe(false);
+
+      const memberRead = await apiJson(path, { session: member });
+      expect(memberRead.response.status).toBe(403);
+      expect(JSON.stringify(memberRead.body)).not.toContain(version.title);
+    }
+
+    const signedOutCreate = await apiFetch('/api/assignments', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: assignmentConfig() }),
+    });
+    expect(signedOutCreate.status).toBe(401);
+
+    const memberCreate = await postJson('/api/assignments', { config: assignmentConfig() }, member);
+    expect(memberCreate.response.status).toBe(403);
+
+    const payload = {
+      baseVersionId: version.id,
+      config: assignmentConfig({ title: 'Denied edit' }),
+    };
+    const signedOutRevise = await apiFetch(`${base}/versions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    expect(signedOutRevise.status).toBe(401);
+
+    const memberRevise = await postJson(`${base}/versions`, payload, member);
+    expect(memberRevise.response.status).toBe(403);
+
+    expect(await countRows('assignments')).toBe(1);
+    expect(await countRows('assignment_versions')).toBe(1);
   });
 });
 

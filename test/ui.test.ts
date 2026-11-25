@@ -161,6 +161,12 @@ describe('HTML access boundary', () => {
 });
 
 describe('library', () => {
+  it('redirects the site root to the library', async () => {
+    const response = await get('/');
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toBe('/assignments');
+  });
+
   it('shows a clear empty state with a create action', async () => {
     const researcher = await signIn(await seedUser());
     const response = await get('/assignments', researcher);

@@ -116,6 +116,42 @@ describe('sign-in', () => {
     expect(unknownEmail.headers.get('set-cookie')).toBeNull();
   });
 
+  it('returns to a safe local next path after sign-in and rejects an open redirect', async () => {
+    const user = await seedUser();
+
+    const first = await SELF.fetch(`${BASE_URL}/sign-in`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        origin: BASE_URL,
+      },
+      body: new URLSearchParams({
+        email: user.email,
+        password: user.password,
+        next: '/assignments/some-id/edit',
+      }).toString(),
+      redirect: 'manual',
+    });
+    expect(first.status).toBe(303);
+    expect(first.headers.get('location')).toBe('/assignments/some-id/edit');
+
+    const second = await SELF.fetch(`${BASE_URL}/sign-in`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        origin: BASE_URL,
+      },
+      body: new URLSearchParams({
+        email: user.email,
+        password: user.password,
+        next: '//evil.example/steal',
+      }).toString(),
+      redirect: 'manual',
+    });
+    expect(second.status).toBe(303);
+    expect(second.headers.get('location')).toBe('/assignments');
+  });
+
   it('redirects an already signed-in user away from the sign-in page', async () => {
     const session = await signIn(await seedUser());
     const response = await SELF.fetch(`${BASE_URL}/sign-in`, {
