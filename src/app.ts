@@ -37,13 +37,18 @@ export default {
 
   async queue(batch: MessageBatch<{ runId?: unknown }>, env: Env): Promise<void> {
     for (const message of batch.messages) {
-      const runId = message.body?.runId;
-      if (typeof runId === 'string' && runId !== '') {
-        await executeRun(env, runId);
+      try {
+        const runId = message.body?.runId;
+        if (typeof runId === 'string' && runId !== '') {
+          await executeRun(env, runId);
+        }
+      } catch (error) {
+        console.error(error);
+      } finally {
+        // #2 has no automatic execution retry: an infrastructure failure is
+        // recorded as an incomplete run and recovery uses a new run.
+        message.ack();
       }
-      // #2 has no automatic execution retry: an infrastructure failure is
-      // recorded as an incomplete run and recovery uses a new run.
-      message.ack();
     }
   },
 

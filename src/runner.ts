@@ -3,7 +3,9 @@ import { RUN_LIMITS, type RunLimits } from './runs';
 export const RUNNER_PROTOCOL = 1;
 export const MAX_ACTUAL_BYTES = 1024 * 1024;
 export const MAX_OUTPUT_BYTES = RUN_LIMITS.outputBytes;
+export const MAX_RUNNER_RESPONSE_BYTES = MAX_ACTUAL_BYTES + 64 * 1024;
 const MAX_DIAGNOSTIC_CHARS = 2000;
+const RUNNER_REQUEST_TIMEOUT_MS = 15_000;
 
 export interface RunnerJob {
   protocol: typeof RUNNER_PROTOCOL;
@@ -64,7 +66,7 @@ const OUTCOMES: ReadonlySet<string> = new Set([
 
 export function parseRunnerResult(
   value: unknown,
-  job: Pick<RunnerJob, 'runId' | 'testId' | 'limits'>,
+  job: Pick<RunnerJob, 'runId' | 'testId' | 'limits' | 'runnerArtifact'>,
 ): RunnerResult {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new RunnerProtocolError('Runner response must be an object.');
@@ -73,7 +75,11 @@ export function parseRunnerResult(
   if (record.protocol !== RUNNER_PROTOCOL) {
     throw new RunnerProtocolError('Runner protocol version is not supported.');
   }
-  if (record.runId !== job.runId || record.testId !== job.testId) {
+  if (
+    record.runId !== job.runId ||
+    record.testId !== job.testId ||
+    record.runnerArtifact !== job.runnerArtifact
+  ) {
     throw new RunnerProtocolError('Runner response identity does not match the job.');
   }
   if (typeof record.outcome !== 'string' || !OUTCOMES.has(record.outcome)) {
@@ -179,14 +185,16 @@ export function createServiceRunner(env: { RUNNER?: Fetcher }): Runner {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(job),
+        signal: AbortSignal.timeout(RUNNER_REQUEST_TIMEOUT_MS),
       });
       if (!response.ok) {
         throw new RunnerUnavailableError(`Runner returned HTTP ${response.status}.`);
       }
       let value: unknown;
       try {
-        value = await response.json();
-      } catch {
+        value = JSON.parse(await readBoundedResponse(response));
+      } catch (error) {
+        if (error instanceof RunnerProtocolError) throw error;
         throw new RunnerProtocolError('Runner returned invalid JSON.');
       }
       const parsed = parseRunnerResult(value, job);
@@ -203,4 +211,35 @@ export function createServiceRunner(env: { RUNNER?: Fetcher }): Runner {
       return parsed;
     },
   };
+}
+
+async function readBoundedResponse(response: Response): Promise<string> {
+  const declared = response.headers.get('content-length');
+  if (declared !== null) {
+    const size = Number.parseInt(declared, 10);
+    if (!Number.isFinite(size) || size > MAX_RUNNER_RESPONSE_BYTES) {
+      throw new RunnerProtocolError('Runner response exceeds the configured size bound.');
+    }
+  }
+  if (response.body === null) return '';
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_RUNNER_RESPONSE_BYTES) {
+      await reader.cancel();
+      throw new RunnerProtocolError('Runner response exceeds the configured size bound.');
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
 }

@@ -66,6 +66,19 @@ describe('run launch', () => {
     expect(run.tests.map((test) => test.status)).toEqual(['pending', 'pending']);
   });
 
+  it('keeps the exact-version page read-only for launching', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createAssignment(researcher);
+    const response = await SELF.fetch(
+      `${BASE_URL}/assignments/${version.assignmentId}/versions/${version.id}`,
+      { headers: { cookie: researcher.cookie } },
+    );
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).not.toContain('/runs" enctype="multipart/form-data"');
+    expect(html).not.toContain('Run tests');
+  });
+
   it('rejects missing files, non-Python files, invalid UTF-8, and oversized files', async () => {
     const researcher = await signIn(await seedUser());
     const version = await createAssignment(researcher);
@@ -196,7 +209,7 @@ describe('run results', () => {
     expect(evidenceHtml).toContain('4');
     expect(evidenceHtml).toContain('printed output');
     expect(evidenceHtml).toContain('execution 11 ms');
-    expect(evidenceHtml).toContain('startup 50 ms (warm reuse)');
+    expect(evidenceHtml).toContain('warm reuse · startup 50 ms');
   });
 
   it('denies signed-out and member reads without exposing source', async () => {

@@ -166,6 +166,7 @@ async function routeAssignmentsHtml(
         user: session,
         version: active,
         notice,
+        canLaunch: true,
         runs: await listRunsForVersion(env.DB, active.id),
       }));
     }
@@ -246,6 +247,7 @@ async function uploadErrorPage(
     assignmentDetailPage({
       user: session,
       version: active,
+      canLaunch: true,
       runs: await listRunsForVersion(env.DB, active.id),
       uploadError: message,
     }),

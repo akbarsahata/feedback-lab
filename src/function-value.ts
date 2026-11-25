@@ -40,7 +40,7 @@ function compare(expected: JsonValue, actual: ActualValue): FunctionValueCompari
     case 'float': {
       const expectedNumber = expectedNumberText(expected);
       if (expectedNumber === null) return { matches: false };
-      return { matches: decimalValuesEqual(expectedNumber, actual.value, actual.kind) };
+      return { matches: numericValuesEqual(expectedNumber, actual.value, actual.kind) };
     }
     case 'str':
       return { matches: typeof expected === 'string' && expected === actual.value };
@@ -84,52 +84,39 @@ function expectedNumberText(value: JsonValue): string | null {
 
 const DECIMAL_PATTERN = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/;
 
-interface Decimal {
-  negative: boolean;
-  digits: bigint;
-  exponent: number;
-}
-
-function decimalValuesEqual(left: string, right: string, kind: 'int' | 'float'): boolean {
-  if (!DECIMAL_PATTERN.test(left) || !DECIMAL_PATTERN.test(right)) {
-    throw new FunctionValueError('The runner returned a non-finite or malformed number.');
+/**
+ * Python compares an integer and a float exactly. For floats, the runner's
+ * repr is the shortest round-trip decimal, not the exact binary64 value, so
+ * rematerialize the double before comparing. The saved expected token is an
+ * exact decimal integer unless it contains a decimal point or exponent.
+ */
+function numericValuesEqual(
+  expectedText: string,
+  actualText: string,
+  actualKind: 'int' | 'float',
+): boolean {
+  if (!DECIMAL_PATTERN.test(expectedText) || !DECIMAL_PATTERN.test(actualText)) {
+    throw new FunctionValueError('The runner returned a malformed number.');
   }
-  if (kind === 'float' && !/[.eE]/.test(right) && !Number.isFinite(Number(right))) {
+  const actualNumber = Number(actualText);
+  if (!Number.isFinite(actualNumber)) {
     throw new FunctionValueError('The runner returned a non-finite number.');
   }
-  return compareDecimals(parseDecimal(left), parseDecimal(right));
-}
-
-function parseDecimal(text: string): Decimal {
-  const match = /^(-?)([0-9]+)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?$/.exec(text);
-  if (match === null) throw new FunctionValueError('The runner returned a malformed number.');
-  const fraction = match[3] ?? '';
-  let digits = BigInt(`${match[2]}${fraction}`);
-  let exponent = Number.parseInt(match[4] ?? '0', 10) - fraction.length;
-  if (!Number.isSafeInteger(exponent)) {
-    throw new FunctionValueError('The runner returned a number outside the supported range.');
+  const expectedLooksFloat = /[.eE]/.test(expectedText);
+  const expectedNumber = Number(expectedText);
+  if (!Number.isFinite(expectedNumber)) {
+    throw new FunctionValueError('The expected number is outside the supported range.');
   }
-  while (digits !== 0n && digits % 10n === 0n) {
-    digits /= 10n;
-    exponent += 1;
+
+  if (actualKind === 'float') {
+    if (expectedLooksFloat) return expectedNumber === actualNumber;
+    if (!Number.isInteger(actualNumber)) return false;
+    return BigInt(actualNumber) === BigInt(expectedText);
   }
-  return { negative: match[1] === '-' && digits !== 0n, digits, exponent };
-}
 
-function compareDecimals(left: Decimal, right: Decimal): boolean {
-  if (left.digits === 0n || right.digits === 0n) return left.digits === right.digits;
-  if (left.negative !== right.negative) return false;
-  const leftMagnitude = left.exponent + decimalLength(left.digits);
-  const rightMagnitude = right.exponent + decimalLength(right.digits);
-  if (leftMagnitude !== rightMagnitude) return false;
-  const alignment = right.exponent - left.exponent;
-  const leftAligned = alignment >= 0 ? left.digits * 10n ** BigInt(alignment) : left.digits;
-  const rightAligned = alignment < 0 ? right.digits * 10n ** BigInt(-alignment) : right.digits;
-  return leftAligned === rightAligned;
-}
-
-function decimalLength(value: bigint): number {
-  return value.toString().length;
+  const actualInteger = BigInt(actualText);
+  if (!expectedLooksFloat) return actualInteger === BigInt(expectedText);
+  return Number.isInteger(expectedNumber) && actualInteger === BigInt(expectedNumber);
 }
 
 function validateActual(value: unknown, depth: number): ActualValue {

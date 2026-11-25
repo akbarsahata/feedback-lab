@@ -200,15 +200,17 @@ Production uses the `feedback-lab` Worker and D1 database at <https://python-ass
 For an initial deployment, authenticate Wrangler and select the Cloudflare account that owns `akbarsahata.id`. Then:
 
 1. If the database does not already exist, run `npx wrangler d1 create feedback-lab`.
-2. `npm run db:migrate:remote`.
-3. Provision two researchers and one member:
+2. Create the test-run queue once: `npx wrangler queues create feedback-lab-test-runs`.
+3. `npm run db:migrate:remote`.
+4. Provision two researchers and one member:
    ```sh
    npm run provision -- --email researcher-a@example.edu --role researcher
    npm run provision -- --email researcher-b@example.edu --role researcher
    npm run provision -- --email member@example.edu --role member
    ```
-4. `npm run deploy`.
-5. Complete the hosted checklist below.
+5. Deploy the native runner from [`runner/`](runner/README.md) behind a private `RUNNER` service binding. Until that binding exists, launches stay **Queued** and never claim to have executed.
+6. `npm run deploy`.
+7. Complete the hosted checklist below.
 
 ### Local verification performed
 
@@ -218,6 +220,8 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
 - The `first_positive` create, reopen, metadata revision, and history flow was exercised manually with `curl` against the local Worker.
 - Local headless Chrome exercised sign-in, repeated editor row add/remove, multiline JSON, save, reopen, and an unchanged resubmit.
 - Local Workers-runtime tests verify that anonymous sign-in is throttled without replacing or blocking an existing session.
+- `npm test` also covers `function-value-v1`, exact-version launch rejection, 64 KiB upload bounds, source byte preservation including a UTF-8 BOM, typed evidence, continuation after failures, duplicate delivery, late-result rejection, reconciliation, and access to run pages.
+- `python3 -m unittest discover -s runner -p 'test_*.py'` covers the native runner contract, including timeout with child processes, output caps, invalid UTF-8 output, recursion, unsupported and cyclic returns, and the 1 MiB return budget. The memory-limit case runs on Linux only.
 
 ### Hosted verification checklist
 
@@ -231,6 +235,12 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
 - [ ] Revise a test and then a criterion, open the original version from history, and confirm its values and referenced version IDs are unchanged.
 - [ ] Open the same active version in two sessions, save in one, then submit the older form in the other. Confirm the second researcher sees a conflict, keeps their edits, and the first save stays active.
 - [ ] Confirm the production database has no seeded assignment data.
+- [ ] Run the `first_positive` example and confirm pass, mismatch, execution error, timeout, memory limit, and output limit appear as distinct outcomes.
+- [ ] Confirm each test starts fresh, outbound traffic and DNS are blocked, and disposable app-file/credential/service canaries are inaccessible in the deployed runner.
+- [ ] Interrupt a run after one recorded result and confirm completed evidence remains, a started test becomes **Infrastructure failure**, and unstarted tests become **Not run**.
+- [ ] Restore the runner and confirm a new known-good run succeeds without changing the interrupted run.
+- [ ] Confirm cold and warm runner timing are shown separately from execution time.
+- [ ] Reopen a saved run after editing the assignment and confirm its source, expected values, and results still resolve to the original versions.
 
 ## Implementation notes and deviations
 
@@ -258,7 +268,14 @@ src/
   password.mjs    shared Worker and Node Web Crypto password helpers
   repository.ts   D1 queries and immutable version writes
   web.ts          server-rendered assignment routes
+  coordinator.ts  sequential run execution and persistence
+  function-value.ts exact typed return comparison
+  runs.ts         submission and test-run storage and state transitions
+  runner.ts       private runner job/result contract
+  runs-web.ts     run summary and per-test evidence pages
+  upload.ts       bounded UTF-8 source uploads
 migrations/       D1 schema (no seeds)
+runner/           native Python runner, harness, image, contract tests
 scripts/          maintainer provisioning
 test/             unit and Workers-runtime integration tests
 docs/adr/         architecture decisions

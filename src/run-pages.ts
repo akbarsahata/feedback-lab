@@ -23,7 +23,7 @@ export function runPage(
   ).length;
   const source = new TextDecoder('utf-8', {
     fatal: false,
-    ignoreBOM: false,
+    ignoreBOM: true,
   }).decode(run.source);
 
   const statusMessage = statusDetail(run);
@@ -34,7 +34,7 @@ export function runPage(
   <td><a href="/runs/${escapeHtml(run.id)}/tests/${escapeHtml(test.id)}"><code>${escapeHtml(test.id)}</code></a></td>
   <td><span class="tag ${testStatusClass(test.status)}">${testStatusLabel(test.status)}</span></td>
   <td class="small">${test.executionMs === null ? '—' : `${test.executionMs} ms`}</td>
-  <td class="small">${test.startupMs === null ? '—' : `${test.startupMs} ms${test.runnerWarm ? ' (warm)' : ' (cold)'}`}</td>
+  <td class="small">${runnerTiming(test)}</td>
   <td class="small">${test.outputTruncated ? 'Partial' : '—'}</td>
 </tr>`,
     )
@@ -124,11 +124,11 @@ function statusDetail(run: TestRunDetail): string {
 }
 
 function lineNumberedSource(source: string): string {
-  const lines = source.split('\n');
+  const lines = source.split(/\r\n|\r|\n/);
   if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
   return `<div class="source" role="region" aria-label="Submitted source with line numbers" tabindex="0">${lines
     .map(
-      (line, index) => `<div class="source-line"><span class="source-number">${index + 1}</span><span class="source-code">${escapeHtml(line.replace(/\r$/, ''))}</span></div>`,
+      (line, index) => `<div class="source-line"><span class="source-number">${index + 1}</span><span class="source-code">${escapeHtml(line)}</span></div>`,
     )
     .join('')}</div>`;
 }
@@ -141,13 +141,33 @@ function safeDisplay(json: string): string {
   }
 }
 
+function runnerTiming(test: {
+  startupMs: number | null;
+  runnerWarm: boolean | null;
+}): string {
+  if (test.runnerWarm === true) {
+    return test.startupMs === null ? 'Warm reuse' : `${test.startupMs} ms (warm)`;
+  }
+  if (test.runnerWarm === false) {
+    return test.startupMs === null ? 'Cold start' : `${test.startupMs} ms (cold)`;
+  }
+  return test.startupMs === null ? '—' : `${test.startupMs} ms`;
+}
+
 function timing(evidence: RunTestEvidence): string {
-  if (evidence.executionMs === null && evidence.startupMs === null) {
+  if (
+    evidence.executionMs === null &&
+    evidence.startupMs === null &&
+    evidence.runnerWarm === null
+  ) {
     return 'Not measured';
   }
   const parts: string[] = [];
+  if (evidence.runnerWarm !== null) {
+    parts.push(evidence.runnerWarm ? 'warm reuse' : 'cold start');
+  }
   if (evidence.startupMs !== null) {
-    parts.push(`startup ${evidence.startupMs} ms${evidence.runnerWarm ? ' (warm reuse)' : ' (cold)'}`);
+    parts.push(`startup ${evidence.startupMs} ms`);
   }
   if (evidence.executionMs !== null) parts.push(`execution ${evidence.executionMs} ms`);
   return parts.join(' · ');

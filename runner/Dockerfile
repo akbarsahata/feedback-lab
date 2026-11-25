@@ -4,7 +4,7 @@ RUN groupadd --system --gid 10001 runner \
     && useradd --system --uid 10001 --gid runner --home-dir /tmp --shell /usr/sbin/nologin runner
 
 WORKDIR /opt/runner
-COPY runner.py harness.py /opt/runner/
+COPY runner.py harness.py submission_child.py /opt/runner/
 
 USER 10001:10001
 EXPOSE 8080

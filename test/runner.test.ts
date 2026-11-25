@@ -8,14 +8,16 @@ import {
 const job = {
   runId: 'run-1',
   testId: 'test-1',
+  runnerArtifact: 'native-python-runner/1',
   limits: { executionMs: 2000, memoryMiB: 128, outputBytes: 16384 },
-} satisfies Pick<RunnerJob, 'runId' | 'testId' | 'limits'>;
+} satisfies Pick<RunnerJob, 'runId' | 'testId' | 'limits' | 'runnerArtifact'>;
 
 function response(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     protocol: 1,
     runId: 'run-1',
     testId: 'test-1',
+    runnerArtifact: 'native-python-runner/1',
     outcome: 'completed',
     actual: { kind: 'none' },
     stdout: '',

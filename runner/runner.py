@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 PROTOCOL = 1
+RUNNER_ARTIFACT = "native-python-runner/1"
 STARTED_AT = time.monotonic()
 MAX_SOURCE_BYTES = 64 * 1024
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
@@ -50,6 +51,10 @@ def validate_job(raw: Any) -> dict[str, Any]:
                   "pythonRelease", "runnerArtifact"):
         if not isinstance(raw.get(field), str) or raw[field] == "":
             raise JobError(f"{field} must be a non-empty string")
+    if raw["runnerArtifact"] != RUNNER_ARTIFACT:
+        raise JobError("runnerArtifact does not match this runner")
+    if raw["pythonRelease"] != platform.python_version():
+        raise JobError("pythonRelease does not match this runner")
     source = raw["source"]
     if len(source.encode("utf-8")) > MAX_SOURCE_BYTES:
         raise JobError("source exceeds the 64 KiB limit")
@@ -98,55 +103,72 @@ def execute_job(job: dict[str, Any], warm: bool) -> dict[str, Any]:
         result_file = tempfile.TemporaryFile()
         result_fd = result_file.fileno()
         os.set_inheritable(result_fd, True)
-        environment = {
-            "PATH": "/usr/local/bin:/usr/bin:/bin",
-            "HOME": work,
-            "TMPDIR": work,
-            "PYTHONNOUSERSITE": "1",
-            "PYTHONIOENCODING": "utf-8",
-            "PYTHONHASHSEED": "0",
-            "LC_ALL": "C.UTF-8",
-            "LANG": "C.UTF-8",
-        }
-        command = [
-            sys.executable,
-            "-I",
-            "-B",
-            str(Path(__file__).with_name("harness.py")),
-            str(job_path),
-            str(result_fd),
-        ]
-        # The execution clock starts after isolation setup and before any
-        # submission code can run.
-        started = time.monotonic()
-        process = subprocess.Popen(
-            command,
-            cwd=work,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            pass_fds=(result_fd,),
-            start_new_session=True,
-            preexec_fn=lambda: apply_limits(limits),
-        )
         try:
-            captured = capture(
-                process,
-                execution_seconds=limits["executionMs"] / 1000,
-                output_bytes=limits["outputBytes"],
-                memory_bytes=limits["memoryMiB"] * 1024 * 1024,
-            )
+            return finish_job(job, limits, work, result_file, result_fd, warm)
         finally:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
-        execution_ms = int((time.monotonic() - started) * 1000)
-        result_file.seek(0)
-        result_bytes = result_file.read(MAX_ACTUAL_BYTES + MAX_DIAGNOSTIC + 4096)
-        result_file.close()
+            result_file.close()
+
+
+def finish_job(
+    job: dict[str, Any],
+    limits: dict[str, int],
+    work: str,
+    result_file: Any,
+    result_fd: int,
+    warm: bool,
+) -> dict[str, Any]:
+    job_path = Path(work) / "job.json"
+    environment = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "HOME": work,
+        "TMPDIR": work,
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONHASHSEED": "0",
+        "LC_ALL": "C.UTF-8",
+        "LANG": "C.UTF-8",
+    }
+    command = [
+        sys.executable,
+        "-I",
+        "-B",
+        str(Path(__file__).with_name("harness.py")),
+        str(job_path),
+        str(result_fd),
+    ]
+    # The execution clock starts after isolation setup and before any
+    # submission code can run.
+    started = time.monotonic()
+    process = subprocess.Popen(
+        command,
+        cwd=work,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        pass_fds=(result_fd,),
+        start_new_session=True,
+        preexec_fn=lambda: apply_limits(limits),
+    )
+    try:
+        captured = capture(
+            process,
+            execution_seconds=limits["executionMs"] / 1000,
+            output_bytes=limits["outputBytes"],
+            memory_bytes=limits["memoryMiB"] * 1024 * 1024,
+        )
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+    execution_ms = int((time.monotonic() - started) * 1000)
+    result_file.seek(0)
+    result_bytes = result_file.read(2 * 1024 * 1024)
 
     result: dict[str, Any] | None = None
     if result_bytes:
@@ -157,12 +179,15 @@ def execute_job(job: dict[str, Any], warm: bool) -> dict[str, Any]:
         except (UnicodeDecodeError, json.JSONDecodeError):
             result = None
 
-    stdout, stderr = captured["stdout"], captured["stderr"]
-    truncated = captured["truncated"]
+    stdout, stderr, output_changed = cap_decoded_output(
+        captured["stdout"], captured["stderr"], limits["outputBytes"]
+    )
+    truncated = captured["truncated"] or output_changed
     common = {
         "protocol": PROTOCOL,
         "runId": job["runId"],
         "testId": job["testId"],
+        "runnerArtifact": job["runnerArtifact"],
         "stdout": stdout,
         "stderr": stderr,
         "outputTruncated": truncated,
@@ -180,7 +205,7 @@ def execute_job(job: dict[str, Any], warm: bool) -> dict[str, Any]:
             "outcome": "timed_out",
             "diagnostic": "The execution reached the configured time limit.",
         }
-    if captured["peak_memory"] >= limits["memoryMiB"] * 1024 * 1024:
+    if captured["memory_limited"] or captured["peak_memory"] >= limits["memoryMiB"] * 1024 * 1024:
         return common | {
             "outcome": "memory_limit",
             "diagnostic": "The execution reached the configured memory limit.",
@@ -195,7 +220,7 @@ def execute_job(job: dict[str, Any], warm: bool) -> dict[str, Any]:
             "outcome": "execution_error",
             "diagnostic": "The execution ended without a readable result.",
         }
-    if result.get("memoryError") is True:
+    if result.get("memoryError") is True and sys.platform.startswith("linux"):
         return common | {
             "outcome": "memory_limit",
             "diagnostic": "The execution reached the configured memory limit.",
@@ -218,24 +243,33 @@ def apply_limits(limits: dict[str, int]) -> None:
 
     memory = limits["memoryMiB"] * 1024 * 1024
     cpu_seconds = max(1, math.ceil(limits["executionMs"] / 1000) + 1)
-    set_limit(resource, "RLIMIT_AS", memory, memory)
+    linux = sys.platform.startswith("linux")
+    # The memory cap is the evidence that lets the runner report a confirmed
+    # memory-limit outcome. Fail closed when the hosted Linux host cannot
+    # enforce it rather than silently degrading to an unconfined test.
+    set_limit(resource, "RLIMIT_AS", memory, memory, required=linux)
     set_limit(resource, "RLIMIT_CPU", cpu_seconds, cpu_seconds + 1)
     set_limit(resource, "RLIMIT_FSIZE", 1024 * 1024, 1024 * 1024)
     set_limit(resource, "RLIMIT_NOFILE", 64, 64)
-    if sys.platform.startswith("linux"):
+    if linux:
         set_limit(resource, "RLIMIT_NPROC", 256, 256)
 
 
-def set_limit(resource: Any, name: str, soft: int, hard: int) -> None:
+def set_limit(
+    resource: Any, name: str, soft: int, hard: int, *, required: bool = False
+) -> None:
     limit = getattr(resource, name, None)
     if limit is None:
+        if required:
+            raise RuntimeError(f"{name} is unavailable on this host")
         return
     try:
         resource.setrlimit(limit, (soft, hard))
-    except (OSError, ValueError):
-        # macOS does not support every Linux limit. The hosted Linux runner
-        # verifies enforcement; local execution still retains the wall clock,
-        # process-group, and output controls.
+    except (OSError, ValueError) as error:
+        # macOS does not support every Linux limit. On Linux the required
+        # memory limit must be enforceable.
+        if required:
+            raise RuntimeError(f"{name} could not be enforced") from error
         return
 
 
@@ -256,10 +290,14 @@ def capture(
     deadline = time.monotonic() + execution_seconds
     timed_out = False
     output_limit = False
+    memory_limited = False
     peak_memory = 0
     open_streams = 2
 
-    while open_streams > 0:
+    # Keep observing until the whole process tree has exited and its output
+    # pipes are closed. A submission can close its pipes and keep running; that
+    # must still hit the wall-clock deadline.
+    while process.poll() is None or open_streams > 0:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             timed_out = True
@@ -267,6 +305,7 @@ def capture(
             break
         peak_memory = max(peak_memory, process_tree_rss(process.pid))
         if peak_memory >= memory_bytes:
+            memory_limited = True
             kill_group(process)
             break
         events = selector.select(min(0.02, remaining))
@@ -300,7 +339,11 @@ def capture(
         if process.poll() is not None and not selector.get_map():
             break
 
-    process.wait()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        kill_group(process)
+        process.wait()
     selector.close()
     for stream in (process.stdout, process.stderr):
         try:
@@ -312,17 +355,39 @@ def capture(
         if process.stdout in buffers else "",
         "stderr": bytes(buffers[process.stderr]).decode("utf-8", "replace")
         if process.stderr in buffers else "",
-        "truncated": timed_out or output_limit,
+        "truncated": timed_out or output_limit or memory_limited,
         "timed_out": timed_out,
         "output_limit": output_limit,
+        "memory_limited": memory_limited,
         "peak_memory": peak_memory,
     }
+
+
+def cap_decoded_output(stdout: str, stderr: str, limit: int) -> tuple[str, str, bool]:
+    """Keep the decoded output within the byte cap after replacement decoding.
+
+    Invalid UTF-8 bytes can expand to U+FFFD. Trimming on a character boundary
+    keeps the Worker's byte validation from rejecting otherwise usable partial
+    evidence.
+    """
+    encoded_stdout = stdout.encode("utf-8")
+    encoded_stderr = stderr.encode("utf-8")
+    if len(encoded_stdout) + len(encoded_stderr) <= limit:
+        return stdout, stderr, False
+    stderr_budget = min(len(encoded_stderr), limit // 4)
+    stdout_budget = limit - stderr_budget
+    if len(encoded_stdout) < stdout_budget:
+        stdout_budget = len(encoded_stdout)
+        stderr_budget = limit - stdout_budget
+    trimmed_stdout = encoded_stdout[:stdout_budget].decode("utf-8", "ignore")
+    trimmed_stderr = encoded_stderr[:stderr_budget].decode("utf-8", "ignore")
+    return trimmed_stdout, trimmed_stderr, True
 
 
 def kill_group(process: subprocess.Popen[bytes]) -> None:
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
 
 
@@ -417,6 +482,7 @@ def serve(port: int) -> None:
                 return
             try:
                 cold = not state["warm"]
+                startup_ms = int((time.monotonic() - STARTED_AT) * 1000)
                 result = execute_job(job, state["warm"])
             except Exception as error:  # pragma: no cover - defensive boundary
                 self.respond(
@@ -426,7 +492,7 @@ def serve(port: int) -> None:
                 return
             state["warm"] = True
             if cold:
-                result["startupMs"] = int((time.monotonic() - STARTED_AT) * 1000)
+                result["startupMs"] = startup_ms
             self.respond(200, result)
 
         def respond(self, status: int, payload: dict[str, Any]) -> None:

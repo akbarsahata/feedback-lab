@@ -236,6 +236,7 @@ export interface AssignmentDetailPageOptions {
   version: AssignmentVersionDetail;
   notice?: string;
   isActive?: boolean;
+  canLaunch?: boolean;
   runs?: RunSummary[];
   uploadError?: string;
 }
@@ -245,6 +246,7 @@ export function assignmentDetailPage({
   version,
   notice,
   isActive = true,
+  canLaunch = false,
   runs = [],
   uploadError,
 }: AssignmentDetailPageOptions): string {
@@ -263,7 +265,7 @@ export function assignmentDetailPage({
 ${notice === undefined ? '' : `<div class="alert alert-ok" role="status">${escapeHtml(notice)}</div>`}
 ${uploadError === undefined ? '' : `<div class="alert alert-error" role="alert">${escapeHtml(uploadError)}</div>`}
 ${isActive ? '<div class="banner ok"><span>This is the active version.</span><a href="' + base + '/history">View saved versions</a></div>' : '<div class="banner"><span>This is a read-only historical version. It is not the active version.</span><a href="' + base + '">Open the active version</a></div>'}
-${isActive ? uploadPanel(base, version, user) : ''}
+${isActive && canLaunch ? uploadPanel(base, version, user) : ''}
 ${runHistory(version.assignmentId, runs)}
 <div class="meta-grid end">
   <div class="metric"><span class="small">Rubric</span><strong>${plural(version.criteria.length, 'criterion', 'criteria')}</strong><span class="small mono">${escapeHtml(version.rubricVersionId)}</span></div>

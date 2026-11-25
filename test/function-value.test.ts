@@ -25,6 +25,21 @@ describe('function-value-v1', () => {
     });
   });
 
+  it('compares large integers against the exact binary64 value', () => {
+    expect(
+      compareFunctionValue(
+        parseJsonValue('1152921504606846976'),
+        actual('{"kind":"float","value":"1.152921504606847e+18"}'),
+      ),
+    ).toEqual({ matches: true });
+    expect(
+      compareFunctionValue(
+        parseJsonValue('1e23'),
+        actual('{"kind":"int","value":"100000000000000000000000"}'),
+      ),
+    ).toEqual({ matches: false });
+  });
+
   it('does not treat booleans and numbers as equal', () => {
     expect(compareFunctionValue(parseJsonValue('true'), actual('{"kind":"bool","value":true}'))).toEqual({
       matches: true,
@@ -95,6 +110,18 @@ describe('function-value-v1', () => {
     expect(() => compareFunctionValue(parseJsonValue('null'), actual('{"kind":"absent"}'))).toThrow(
       FunctionValueError,
     );
+  });
+
+  it('matches supported values nested through the full depth limit', () => {
+    let expectedJson = 'null';
+    let actualJson = '{"kind":"none"}';
+    for (let index = 0; index < 64; index += 1) {
+      expectedJson = `[${expectedJson}]`;
+      actualJson = `{"kind":"list","items":[${actualJson}]}`;
+    }
+    expect(compareFunctionValue(parseJsonValue(expectedJson), actual(actualJson))).toEqual({
+      matches: true,
+    });
   });
 
   it('rejects unsupported returns and excessive nesting', () => {

@@ -11,7 +11,7 @@ export async function dispatchRun(
   runId: string,
   now: Date = new Date(),
 ): Promise<void> {
-  if (env.TEST_RUN_QUEUE === undefined) return;
+  if (env.TEST_RUN_QUEUE === undefined || env.RUNNER === undefined) return;
   try {
     await env.TEST_RUN_QUEUE.send({ runId });
   } catch {

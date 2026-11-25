@@ -5,7 +5,9 @@ import type { Runner, RunnerJob, RunnerResult } from '../src/runner';
 import {
   claimRun,
   createSubmissionRun,
+  getRunTestEvidence,
   getTestRun,
+  markRunIncomplete,
   markTestRunning,
   reconcileRuns,
   recordTestResult,
@@ -147,6 +149,71 @@ describe('test runs', () => {
     expect(run.tests[0]?.diagnostic).toContain('runner connection lost');
   });
 
+  it('executes the exact submitted bytes, including a UTF-8 BOM', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createAssignment(researcher);
+    const source = '\uFEFFdef first_positive(values):\n    return 4\n';
+    const runId = await launch(researcher, version, source);
+    let seen = '';
+    await executeRun(env, runId, {
+      runner: {
+        async runTest(job) {
+          seen = job.source;
+          return result(job, job.testId === 'list-argument'
+            ? { kind: 'int', value: '4' }
+            : { kind: 'none' });
+        },
+      },
+    });
+    expect(seen).toBe(source);
+    expect(seen.charCodeAt(0)).toBe(0xfeff);
+  });
+
+  it('rejects a late result after the run is already complete', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createAssignment(researcher);
+    const runId = await launch(researcher, version);
+    await executeRun(env, runId, {
+      runner: runnerFor({
+        'list-argument': { kind: 'int', value: '4' },
+        'empty-list': { kind: 'none' },
+      }),
+    });
+
+    const late = await recordTestResult(env.DB, runId, 'empty-list', {
+      status: 'mismatch',
+      actualJson: '{"kind":"int","value":"1"}',
+      stdout: '',
+      stderr: '',
+      outputTruncated: false,
+      diagnostic: null,
+      executionMs: 5,
+      startupMs: 10,
+      runnerWarm: true,
+      now: new Date().toISOString(),
+    });
+    expect(late).toBe(false);
+    expect((await getTestRun(env.DB, runId)).status).toBe('complete');
+    expect((await getTestRun(env.DB, runId)).tests[1]?.status).toBe('pass');
+  });
+
+  it('stores a return value at the 1 MiB budget without overshooting D1 rows', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createAssignment(researcher);
+    const runId = await launch(researcher, version);
+    const large = 'x'.repeat(1024 * 1024 - 64);
+    await executeRun(env, runId, {
+      runner: runnerFor({
+        'list-argument': { kind: 'str', value: large },
+        'empty-list': { kind: 'none' },
+      }),
+    });
+
+    const evidence = await getRunTestEvidence(env.DB, runId, 'list-argument');
+    expect(evidence?.status).toBe('mismatch');
+    expect(evidence?.actualJson?.length).toBeGreaterThan(1024 * 1024 - 100);
+  });
+
   it('does not execute a duplicate delivery twice', async () => {
     const researcher = await signIn(await seedUser());
     const version = await createAssignment(researcher);
@@ -187,8 +254,9 @@ describe('test runs', () => {
     expect(response.status).toBe(201);
 
     const run = await getTestRun(env.DB, runId);
+    const evidence = await getRunTestEvidence(env.DB, runId, 'list-argument');
     expect(run.assignmentVersionId).toBe(version.id);
-    expect(run.tests[0]?.expectedReturnJson).toBe('4');
+    expect(evidence?.expectedReturnJson).toBe('4');
     expect(run.tests[0]?.status).toBe('pass');
   });
 
@@ -287,6 +355,31 @@ describe('test runs', () => {
       now: new Date().toISOString(),
     });
     expect(late).toBe(false);
+  });
+
+  it('rejects a late in-flight result after an interruption finalizes the run', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createAssignment(researcher);
+    const runId = await launch(researcher, version);
+    await claimRun(env.DB, runId, new Date().toISOString());
+    await markTestRunning(env.DB, runId, 'list-argument', new Date().toISOString());
+    await markRunIncomplete(env.DB, runId, 'runner interrupted', new Date().toISOString());
+
+    const late = await recordTestResult(env.DB, runId, 'list-argument', {
+      status: 'pass',
+      actualJson: '{"kind":"int","value":"4"}',
+      stdout: '',
+      stderr: '',
+      outputTruncated: false,
+      diagnostic: null,
+      executionMs: 5,
+      startupMs: 10,
+      runnerWarm: false,
+      now: new Date().toISOString(),
+    });
+    expect(late).toBe(false);
+    const run = await getTestRun(env.DB, runId);
+    expect(run.tests[0]?.status).toBe('infrastructure_failure');
   });
 
   it('rejects a launch whose version is no longer active', async () => {

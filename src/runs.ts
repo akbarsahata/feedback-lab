@@ -144,8 +144,6 @@ export async function createSubmissionRun(
 export interface RunTestSummary {
   id: string;
   position: number;
-  argumentsJson: string;
-  expectedReturnJson: string;
   status: TestStatus;
   startedAt: string | null;
   finishedAt: string | null;
@@ -157,6 +155,8 @@ export interface RunTestSummary {
 }
 
 export interface RunTestEvidence extends RunTestSummary {
+  argumentsJson: string;
+  expectedReturnJson: string;
   actualJson: string | null;
   stdout: string;
   stderr: string;
@@ -210,8 +210,6 @@ interface RunRow {
 interface ResultRow {
   test_id: string;
   position: number;
-  arguments_json: string;
-  expected_return_json: string;
   status: TestStatus;
   started_at: string | null;
   finished_at: string | null;
@@ -222,7 +220,19 @@ interface ResultRow {
   diagnostic: string | null;
 }
 
-interface EvidenceRow extends ResultRow {
+interface EvidenceRow {
+  test_id: string;
+  position: number;
+  arguments_json: string;
+  expected_return_json: string;
+  status: TestStatus;
+  started_at: string | null;
+  finished_at: string | null;
+  execution_ms: number | null;
+  startup_ms: number | null;
+  runner_warm: number | null;
+  output_truncated: number;
+  diagnostic: string | null;
   actual_json: string | null;
   stdout: string | null;
   stderr: string | null;
@@ -248,7 +258,7 @@ export async function getTestRun(db: D1Database, runId: string): Promise<TestRun
 
   const { results } = await db
     .prepare(
-      `SELECT t.test_id, t.position, t.arguments_json, t.expected_return_json,
+      `SELECT t.test_id, t.position,
               tr.status, tr.started_at, tr.finished_at, tr.execution_ms, tr.startup_ms,
               tr.runner_warm, tr.output_truncated, tr.diagnostic
        FROM test_runs r
@@ -283,18 +293,41 @@ export async function getTestRun(db: D1Database, runId: string): Promise<TestRun
     tests: results.map((row) => ({
       id: row.test_id,
       position: row.position,
-      argumentsJson: row.arguments_json,
-      expectedReturnJson: row.expected_return_json,
       status: row.status,
       startedAt: row.started_at,
       finishedAt: row.finished_at,
       executionMs: row.execution_ms,
       startupMs: row.startup_ms,
-      runnerWarm: row.runner_warm === null ? null : row.runner_warm === 1,
+      runnerWarm: warmFromRow(row.runner_warm),
       outputTruncated: row.output_truncated === 1,
       diagnostic: row.diagnostic,
     })),
   };
+}
+
+function warmFromRow(value: number | null): boolean | null {
+  return value === null ? null : value === 1;
+}
+
+export interface TestExecutionInput {
+  argumentsJson: string;
+  expectedReturnJson: string;
+}
+
+export async function getTestExecutionInput(
+  db: D1Database,
+  runId: string,
+  testId: string,
+): Promise<TestExecutionInput | null> {
+  return db
+    .prepare(
+      `SELECT t.arguments_json AS argumentsJson, t.expected_return_json AS expectedReturnJson
+       FROM test_runs r
+       JOIN tests t ON t.test_suite_version_id = r.test_suite_version_id
+       WHERE r.id = ? AND t.test_id = ?`,
+    )
+    .bind(runId, testId)
+    .first<TestExecutionInput>();
 }
 
 export async function getRunTestEvidence(
@@ -326,7 +359,7 @@ export async function getRunTestEvidence(
     finishedAt: row.finished_at,
     executionMs: row.execution_ms,
     startupMs: row.startup_ms,
-    runnerWarm: row.runner_warm === null ? null : row.runner_warm === 1,
+    runnerWarm: warmFromRow(row.runner_warm),
     outputTruncated: row.output_truncated === 1,
     diagnostic: row.diagnostic,
     actualJson: row.actual_json,

@@ -8,7 +8,7 @@ One job runs one configured test. The submission executes in a fresh child proce
 python3 -m unittest discover -s runner -p 'test_*.py' -v
 ```
 
-The memory-limit test runs only on Linux because macOS does not enforce address-space limits the same way.
+The memory-limit test runs only on Linux because macOS does not enforce address-space limits the same way. The harness keeps the evidence descriptor out of the submission child; the child returns only its tagged actual value over a separate pipe.
 
 ## Local one-shot
 
@@ -25,7 +25,7 @@ The image is `python:3.12.11-slim-bookworm`, which pins the Python release recor
 - no outbound network or public DNS, including non-HTTP traffic;
 - no app files, credentials, bindings, or trusted local services;
 - a read-only root filesystem with a writable, disposable temporary directory;
-- enforcement of the 128 MiB memory limit across the whole execution, including child processes;
+- enforcement of the 128 MiB memory limit across the whole execution, including child processes; the host quota must be larger than the test cap so the runner observes the test limit rather than the host being OOM-killed;
 - shutdown or replacement of the container between runs when freshness cannot be proven.
 
 Build and run the image with networking disabled:
@@ -33,7 +33,7 @@ Build and run the image with networking disabled:
 ```sh
 docker build -t feedback-lab-runner:1 runner
 docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
-  --memory 128m --cpus 0.25 -p 127.0.0.1:8080:8080 feedback-lab-runner:1
+  --memory 256m --cpus 0.25 -p 127.0.0.1:8080:8080 feedback-lab-runner:1
 ```
 
 The Worker adapter is `createServiceRunner` in `src/runner.ts`; bind it to a private `RUNNER` service. Do not add a public route.

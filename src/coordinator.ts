@@ -5,10 +5,9 @@ import {
 } from './function-value';
 import { parseJsonValue } from './json';
 import {
-  RUN_LIMITS,
-  RUNNER_ARTIFACT,
   claimRun,
   finalizeRunIfDone,
+  getTestExecutionInput,
   getTestRun,
   markRunIncomplete,
   markTestRunning,
@@ -62,7 +61,7 @@ export async function executeRun(
 
   let source: string;
   try {
-    source = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(run.source);
+    source = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(run.source);
   } catch {
     await markRunIncomplete(
       env.DB,
@@ -79,15 +78,26 @@ export async function executeRun(
     // run. Stop rather than re-executing or skipping ahead.
     if (!(await markTestRunning(env.DB, runId, test.id, now))) return;
 
+    const input = await getTestExecutionInput(env.DB, runId, test.id);
+    if (input === null) {
+      await markRunIncomplete(
+        env.DB,
+        runId,
+        'The pinned test input could not be loaded.',
+        clock().toISOString(),
+      );
+      return;
+    }
+
     let result: RunnerResult;
     try {
-      result = await runner.runTest(jobFor(run, test, source));
+      result = await runner.runTest(jobFor(run, test, input.argumentsJson, source));
     } catch (error) {
       await markRunIncomplete(env.DB, runId, reasonFor(error), clock().toISOString());
       return;
     }
 
-    const recorded = classify(test, result);
+    const recorded = classify(input, result);
     const written = await recordTestResult(env.DB, runId, test.id, {
       ...recorded,
       now: clock().toISOString(),
@@ -98,22 +108,27 @@ export async function executeRun(
   await finalizeRunIfDone(env.DB, runId, clock().toISOString());
 }
 
-function jobFor(run: TestRunDetail, test: RunTestSummary, source: string): RunnerJob {
+function jobFor(
+  run: TestRunDetail,
+  test: RunTestSummary,
+  argumentsJson: string,
+  source: string,
+): RunnerJob {
   return {
     protocol: 1,
     runId: run.id,
     testId: test.id,
     entryPoint: run.entryPoint,
     source,
-    argumentsJson: test.argumentsJson,
+    argumentsJson,
     pythonRelease: run.pythonRelease,
-    runnerArtifact: run.runnerArtifact || RUNNER_ARTIFACT,
-    limits: { ...RUN_LIMITS, ...run.limits },
+    runnerArtifact: run.runnerArtifact,
+    limits: run.limits,
   };
 }
 
 function classify(
-  test: RunTestSummary,
+  input: { expectedReturnJson: string },
   result: RunnerResult,
 ): {
   status:
@@ -153,7 +168,7 @@ function classify(
   const actualJson = JSON.stringify(result.actual);
   try {
     const comparison = compareFunctionValue(
-      parseJsonValue(test.expectedReturnJson),
+      parseJsonValue(input.expectedReturnJson),
       result.actual as ActualValue,
     );
     return {

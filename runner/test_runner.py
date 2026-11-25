@@ -27,7 +27,7 @@ def job(source: str, *, arguments: object = None, limits: dict | None = None) ->
         "source": source,
         "argumentsJson": json.dumps(arguments if arguments is not None else []),
         "pythonRelease": platform.python_version(),
-        "runnerArtifact": "test-runner",
+        "runnerArtifact": runner.RUNNER_ARTIFACT,
         "limits": limits or dict(LIMITS),
     }
 
@@ -111,6 +111,20 @@ class RunnerContractTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "output_limit")
         self.assertTrue(result["outputTruncated"])
         self.assertLessEqual(len(result["stdout"].encode()), 512)
+
+    def test_invalid_output_bytes_stay_within_the_decoded_cap(self) -> None:
+        result = self.run_job(
+            "import sys\n"
+            "def answer():\n"
+            "    sys.stdout.buffer.write(b'\\xff' * 4000)\n"
+            "    return None\n",
+            limits={**LIMITS, "outputBytes": 512},
+        )
+        self.assertEqual(result["outcome"], "output_limit")
+        self.assertLessEqual(
+            len(result["stdout"].encode("utf-8")) + len(result["stderr"].encode("utf-8")),
+            512,
+        )
 
     def test_unsupported_return_is_an_execution_error(self) -> None:
         result = self.run_job("def answer():\n    return {1, 2}\n")
