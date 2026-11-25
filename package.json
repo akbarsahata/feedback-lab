@@ -11,8 +11,7 @@
     "test:watch": "vitest",
     "db:migrate:local": "wrangler d1 migrations apply feedback-lab --local",
     "db:migrate:remote": "wrangler d1 migrations apply feedback-lab --remote",
-    "provision": "node scripts/provision-user.mjs",
-    "cf-typegen": "wrangler types"
+    "provision": "node scripts/provision-user.mjs"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.9.2",
