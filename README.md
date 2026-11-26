@@ -1,12 +1,12 @@
 # Feedback Lab
 
-Feedback Lab is the research platform for inspecting AI feedback on introductory Python assignments. The repository implements issue #1's **versioned assignment configuration**, issue #2's **isolated test runs**, and issue #3's **script assignments plus generated JSON API docs**.
+Feedback Lab is the research platform for inspecting AI feedback on introductory Python assignments. The repository implements issue #1's **versioned assignment configuration**, issue #2's **isolated test runs**, issue #3's **script assignments plus generated JSON API docs**, and issue #4's **versioned paired datasets with researcher verification and held-out release**.
 
 A pre-approved researcher can sign in, create a Python **function** or **script** assignment with an ordered rubric and ordered tests, revise it, and open any saved configuration read-only. Every save that changes content creates immutable versions. A save based on an older active version is rejected instead of overwriting a newer one. A format switch creates a new assignment version and a new single-format test suite; existing runs keep their original format, source, expectations, and results.
 
 A researcher can also upload one synthetic UTF-8 Python file, launch the assignment's tests, and reopen line-numbered source and per-test evidence. A **Test run** pins the submission, assignment, rubric, test suite, Python release, runner artifact, and limits. Later edits do not change saved results.
 
-Paired datasets, feedback generation, same-run study resume, aggregate reporting, seeded library data, drafts, restore/branching, and automatic merging are intentionally out of scope.
+Paired datasets are now in scope: a researcher imports a package, verifies and signs off each case, records pinned study runs, freezes the revision, and releases held-out cases after the study protocol is locked. Feedback generation, same-run study resume, aggregate reporting, seeded library data, drafts, restore/branching, and automatic merging are intentionally out of scope.
 
 ## Stack
 
@@ -139,6 +139,13 @@ HTML:
 | `POST /assignments/:id/runs` | Upload one UTF-8 `.py` file (64 KiB maximum) and launch a run against the active version. Stale version IDs return 409. |
 | `GET /runs/:id` | Version-pinned run summary and line-numbered submitted source. |
 | `GET /runs/:id/tests/:testId` | Recorded expected/actual values, script stdin/stdout, separate stdout/stderr, diagnostics, and timings for one test. |
+| `GET /datasets` | Dataset library and the package import form. |
+| `POST /datasets/import` | Import a manifest, scoring key, and verification record as three JSON files. |
+| `GET /datasets/:revisionId` | Researcher review: coverage, keys, sources, sign-off state, attempts, freeze, and release. |
+| `POST /datasets/:revisionId/sign-off` | Record a researcher sign-off for one case fingerprint. |
+| `POST /datasets/:revisionId/runs` | Launch a pinned study run for one dataset submission. |
+| `POST /datasets/:revisionId/freeze` | Freeze a fully verified, fully run dataset revision. |
+| `POST /datasets/:revisionId/release` | Release held-out cases with a study-protocol reference. |
 
 ## JSON API and generated docs
 
@@ -164,6 +171,39 @@ Each test runs in a fresh native Python execution with standard library only. Th
 The native runner lives in [`runner/`](runner/README.md), and its private Container Worker adapter lives in [`runner-worker/`](runner-worker). The Worker publishes committed runs through `feedback-lab-test-runs`; the queue consumer calls the private `RUNNER` service binding. Each **Test run** gets its own container instance, so state from one run cannot affect another. Within a run, each test still executes in a fresh Python child process.
 
 The deployed runner uses the `basic` instance (0.25 vCPU, 1024 MiB), Python `3.12.11`, `enableInternet: false`, and the per-test limits above. The image precompiles the Python standard library at build time so each test does not recompile imports on the slow container. The hosted issue #2 baseline is in [`docs/verification/issue-2-hosted-runner.md`](docs/verification/issue-2-hosted-runner.md); the issue #3 record in [`docs/verification/issue-3-hosted-runner.md`](docs/verification/issue-3-hosted-runner.md) records the deployed versions and hosted checks, including the long-suite CPU limitation; [`docs/verification/issue-14-hosted-runner.md`](docs/verification/issue-14-hosted-runner.md) records the long-suite fix and slow-host checks. Local tests use a fake runner and the Python contract tests; a local or fake-runner pass does not replace hosted evidence.
+
+## Paired datasets
+
+Issue #4 adds versioned development and held-out cases with a separate scoring key and verification record. The package format and researcher workflow are documented in [`docs/dataset-package.md`](docs/dataset-package.md); a disposable import example lives under [`examples/dataset-package/`](examples/dataset-package/).
+
+A **Dataset revision** is an immutable import. Import maps each package assignment to a new exact assignment snapshot and stores each submission's exact source, SHA-256, and scoring entry. Re-importing the same dataset ID and revision is a no-op when the content digest matches; changed contents under the same label are rejected.
+
+Researcher sign-off binds the current user and timestamp to a fingerprint of the case and a note describing the evidence reviewed: family, split, assignment version, format, pair links, authoring checks, submission sources, and scoring entries. If scored contents change, freeze refuses the stale sign-off. Freeze also requires:
+
+- every case signed off;
+- a clean single, a fixed pair, and a partial pair in each split and assignment format (12 cases and 20 submission versions minimum);
+- a completed run with a recorded execution outcome for every test of the pinned suite;
+- every clean submission passing every supplied study test;
+- a buggy submission that passes every supplied study test in each split and format.
+
+Freeze pins the selected successful run on each submission in one guarded D1 batch. Failed attempts remain visible, and a retry uses a new submission/run pair. After freeze, study launches stop; corrections create a new revision while earlier revisions remain readable.
+
+Held-out release is separate. It records the researcher, timestamp, and the frozen study-protocol reference. The study read path enforces the split before listing or direct lookup:
+
+| `use` | Split | When |
+| --- | --- | --- |
+| `pilot` | `development` | Any frozen revision |
+| `main` | `held_out` | Only after release |
+
+The evidence projection for one submission contains its exact source, assignment instructions, rubric, and supplied study tests with recorded results. It excludes the counterpart source, pair links, original/corrected labels, the scoring key, and authoring verification evidence. Pair links and the frozen key are available through a separate scoring read.
+
+Study JSON endpoints, all researcher-only:
+
+- `GET /api/datasets/:revisionId/study/cases?use=pilot|main`
+- `GET /api/datasets/:revisionId/study/evidence/:submissionId?use=pilot|main`
+- `GET /api/datasets/:revisionId/study/scoring/:caseKey?use=pilot|main`
+
+The real corpus, scoring key, and verification record stay in restricted researcher storage; this public repository commits only the format, implementation, tests, and disposable examples. The initial corpus must still be imported, verified, run, and frozen in an authorized environment with the real private runner.
 
 ## Deployment
 
@@ -198,6 +238,7 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
 - Local Workers-runtime tests verify that anonymous sign-in is throttled without replacing or blocking an existing session.
 - `npm test` also covers `function-value-v1`, exact-version launch rejection, 64 KiB upload bounds, source byte preservation including a UTF-8 BOM, typed evidence, continuation after failures, duplicate delivery, late-result rejection, reconciliation, and access to run pages.
 - Issue #3 coverage includes script configuration and 16 KiB/UTF-8 validation, exact stdin/expected-stdout preservation, format switches with old evidence retained, the stdout comparison matrix, invalid UTF-8 and resource-limit precedence, the old-migration D1 fixture with `foreign_key_check`, generated request/response schema checks, and researcher-only `/api/docs`, `/api/openapi.json`, and pinned assets.
+- Issue #4 coverage includes package validation with case-level errors, split/family/source isolation, targeted-error consistency, idempotent import with digest conflicts, exact assignment snapshots, sign-off fingerprint invalidation, complete-run freeze gates, retained failed attempts and retries, immutable frozen revisions, pilot/held-out release enforcement, and an allowlisted one-submission evidence projection. The disposable example package imports and is validated in tests.
 - `python3 -m unittest discover -s runner -p 'test_*.py'` covers the native runner contract, including timeout with child processes, output caps, invalid UTF-8 output, recursion, unsupported and cyclic returns, the 1 MiB return budget, script `__main__` execution, byte-exact stdin through EOF, empty input/output, CRLF preservation, nonzero exit, artifact mismatches, and the private HTTP endpoint. The memory-limit case runs on Linux only.
 
 ### Hosted verification checklist
@@ -224,6 +265,9 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
 - [x] On the deployed runner, demonstrate script `__main__`, stdin to EOF, expected `7` matching `7\n`, empty output, an extra-space mismatch, a nonzero exit, and output truncation. Confirm the shared 2 s / 128 MiB / 16 KiB limits still apply.
 - [x] Open `/api/docs` as a researcher and run a GET with Try it out; confirm POST Try it out is unavailable. Confirm signed-out users and members cannot fetch the docs page, spec, or assets.
 - [x] Record the deployed revision, runner artifact, Python release, limits, and observed results in `docs/verification/issue-3-hosted-runner.md`.
+- [ ] Import the restricted issue #4 package into the hosted environment, review and sign off every case, and record a study run for every submission with the real private runner.
+- [ ] Freeze the initial revision, confirm all four coverage cells, and confirm held-out cases are denied to the pilot before release and readable for the main study only after release.
+- [ ] Confirm the hosted evidence response excludes pair links, original/corrected labels, the scoring key, and authoring verification evidence.
 
 ## Implementation notes and deviations
 
@@ -233,6 +277,11 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
 - Stored function JSON is canonical (`[[4,-1]]`); the edit form and detail view add spacing for display (`[[4, -1]]`) without changing values or numeric kinds. Function responses no longer include decoded `arguments`/`expectedReturn`; use the JSON text fields. The edit form uses multiline JSON inputs so pasted formatting is kept on validation and conflict responses.
 - Script text is stored exactly. The detail and evidence views show the raw text plus a whitespace view that marks spaces, tabs, CRLF, and blank lines; this is display-only.
 - Migration `0003_script_assignments.sql` rebuilds the cyclic assignment/run graph through parallel tables before renaming them. This avoids the D1 behavior where dropping a referenced parent can leave deferred foreign-key state even after a same-named replacement exists. The migration fixture applies only `0001`/`0002`, seeds function evidence and a newer active version, then applies `0003` and checks IDs, counts, and `foreign_key_check`.
+- Migration `0004_datasets.sql` adds dataset revisions, case and submission membership, attempts, sign-offs, and release records. Dataset tables link to existing assignment, submission, and run rows; they do not copy run evidence. A frozen revision is immutable and study reads select only its pinned runs.
+- The dataset package parser is pure and synchronous. The importer hashes canonicalized manifest/scoring/verification JSON, composes assignment snapshots and dataset rows in one D1 batch, and treats a digest mismatch under the same revision label as a conflict. Assignment creation and dataset import share `assignmentSnapshotStatements`.
+- Package sources are embedded in the manifest as UTF-8 text (or base64) rather than uploaded as individual `.py` files. This keeps one import request bounded and lets the importer validate every source before writing. Stored source bytes and SHA-256 are preserved exactly.
+- The scoring key is versioned with the dataset revision; there is no separately mutable key. The canonical package digest identifies the imported manifest, key, and verification record together.
+- The restricted corpus, its key, verification record, and freeze identifiers are not committed to this public repository. See the local verification record [`docs/verification/issue-4-local.md`](docs/verification/issue-4-local.md) for what remains to be done in the authorized environment.
 - Tests use a small cleanup helper between cases because the installed Workers Vitest plugin did not isolate D1 storage between tests automatically. Production migrations never seed data.
 
 ## Project layout
@@ -256,13 +305,19 @@ src/
   password.mjs    shared Worker and Node Web Crypto password helpers
   repository.ts   D1 queries and immutable version writes
   web.ts          server-rendered assignment routes
+  dataset-package.ts      dataset package parsing and validation
+  dataset-repository.ts   dataset revisions, sign-offs, attempts, freeze, study reads
+  dataset-web.ts          researcher dataset routes
+  dataset-pages.ts        dataset library, review, freeze, and release views
+  dataset-api.ts          researcher-only study JSON endpoints
   coordinator.ts  sequential run execution and persistence
   function-value.ts exact typed return comparison
   runs.ts         submission and test-run storage and state transitions
   runner.ts       private runner job/result contract
   runs-web.ts     run summary and per-test evidence pages
   upload.ts       bounded UTF-8 source uploads
-migrations/       D1 schema (no seeds); 0003 rebuilds the assignment/run graph
+migrations/       D1 schema (no seeds); 0003 rebuilds the assignment/run graph, 0004 adds datasets
+examples/dataset-package/ disposable import example, not study data
 public/api/docs/  pinned same-origin Swagger UI assets from swagger-ui-dist 5.36.0
 runner/           native Python runner, image, contract tests
 runner-worker/    private Container Worker adapter and per-run routing

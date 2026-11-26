@@ -1,0 +1,24 @@
+{
+  "datasetId": "example-intro-python",
+  "revision": "2026-11-27.1",
+  "cases": {
+    "demo-fn-clean": {
+      "authoringChecks": [
+        {
+          "id": "source-review",
+          "status": "pass",
+          "note": "Disposable example; checked against the requirement."
+        }
+      ]
+    },
+    "demo-io-clean": {
+      "authoringChecks": [
+        {
+          "id": "source-review",
+          "status": "pass",
+          "note": "Disposable example; checked against the requirement."
+        }
+      ]
+    }
+  }
+}

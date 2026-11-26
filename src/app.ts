@@ -1,5 +1,7 @@
 import { handleAssignmentsApi } from './api';
 import { errorResponseSchema, sessionResponseSchema } from './api-schemas';
+import { handleDatasetsApi } from './dataset-api';
+import { handleDatasetsHtml } from './dataset-web';
 import { handleApiDocs } from './docs';
 import { validatedJsonResponse } from './validated-response';
 import { executeRun } from './coordinator';
@@ -97,6 +99,12 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   const docsResponse = await handleApiDocs(request, env, path);
   if (docsResponse !== null) return docsResponse;
+
+  const datasetsApiResponse = await handleDatasetsApi(request, env, path);
+  if (datasetsApiResponse !== null) return datasetsApiResponse;
+
+  const datasetsHtmlResponse = await handleDatasetsHtml(request, env, path);
+  if (datasetsHtmlResponse !== null) return datasetsHtmlResponse;
 
   const htmlResponseForAssignments = await handleAssignmentsHtml(request, env, path);
   if (htmlResponseForAssignments !== null) {

@@ -98,6 +98,7 @@ export function shell({ title, user, body }: ShellOptions): string {
   ${brand()}
   <nav class="nav" aria-label="Main navigation">
     <a href="/assignments"><span aria-hidden="true">▤</span>Assignments</a>
+    <a href="/datasets"><span aria-hidden="true">▦</span>Datasets</a>
   </nav>
 </aside>
 <div class="workspace">

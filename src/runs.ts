@@ -77,6 +77,64 @@ export interface LaunchSubmission {
   now: string;
 }
 
+export interface SubmissionRunRecord {
+  runId: string;
+  submissionId: string;
+  userId: string;
+  now: string;
+  requireActive: boolean;
+}
+
+/**
+ * Builds the test-run and pending-result inserts for an existing submission
+ * version. Normal uploads require the assignment version to still be active;
+ * dataset imports launch against the exact pinned version instead.
+ */
+export function submissionRunStatements(
+  db: D1Database,
+  record: SubmissionRunRecord,
+): D1PreparedStatement[] {
+  return [
+    db
+      .prepare(
+        `INSERT INTO test_runs
+           (id, submission_id, assignment_id, assignment_version_id, rubric_version_id,
+            test_suite_version_id, comparison_rule, python_release, runner_artifact,
+            limits_json, status, queued_at, created_by)
+         SELECT ?, s.id, s.assignment_id, s.assignment_version_id, s.rubric_version_id,
+                s.test_suite_version_id,
+                CASE v.format WHEN 'script' THEN ? ELSE ? END,
+                ?, ?, ?, 'queued', ?, ?
+         FROM submission_versions s
+         JOIN assignment_versions v ON v.id = s.assignment_version_id
+         JOIN assignments a ON a.id = s.assignment_id
+         WHERE s.id = ?
+           AND (? = 0 OR a.active_version_id = s.assignment_version_id)`,
+      )
+      .bind(
+        record.runId,
+        SCRIPT_COMPARISON_RULE,
+        COMPARISON_RULE,
+        PYTHON_RELEASE,
+        RUNNER_ARTIFACT,
+        JSON.stringify(RUN_LIMITS),
+        record.now,
+        record.userId,
+        record.submissionId,
+        record.requireActive ? 1 : 0,
+      ),
+    db
+      .prepare(
+        `INSERT INTO test_results (run_id, test_id, position, status)
+         SELECT r.id, t.test_id, t.position, 'pending'
+         FROM test_runs r
+         JOIN tests t ON t.test_suite_version_id = r.test_suite_version_id
+         WHERE r.id = ?`,
+      )
+      .bind(record.runId),
+  ];
+}
+
 /**
  * Creates the submission, test run, and pending per-test records only when the
  * requested version is still the assignment's active version. The D1 batch is
@@ -109,41 +167,13 @@ export async function createSubmissionRun(
         launch.assignmentId,
         launch.assignmentVersionId,
       ),
-    db
-      .prepare(
-        `INSERT INTO test_runs
-           (id, submission_id, assignment_id, assignment_version_id, rubric_version_id,
-            test_suite_version_id, comparison_rule, python_release, runner_artifact,
-            limits_json, status, queued_at, created_by)
-         SELECT ?, s.id, s.assignment_id, s.assignment_version_id, s.rubric_version_id,
-                s.test_suite_version_id,
-                CASE v.format WHEN 'script' THEN ? ELSE ? END,
-                ?, ?, ?, 'queued', ?, ?
-         FROM submission_versions s
-         JOIN assignments a ON a.id = s.assignment_id
-         JOIN assignment_versions v ON v.id = s.assignment_version_id
-         WHERE s.id = ? AND a.active_version_id = s.assignment_version_id`,
-      )
-      .bind(
-        runId,
-        SCRIPT_COMPARISON_RULE,
-        COMPARISON_RULE,
-        PYTHON_RELEASE,
-        RUNNER_ARTIFACT,
-        JSON.stringify(RUN_LIMITS),
-        launch.now,
-        launch.userId,
-        submissionId,
-      ),
-    db
-      .prepare(
-        `INSERT INTO test_results (run_id, test_id, position, status)
-         SELECT r.id, t.test_id, t.position, 'pending'
-         FROM test_runs r
-         JOIN tests t ON t.test_suite_version_id = r.test_suite_version_id
-         WHERE r.id = ?`,
-      )
-      .bind(runId),
+    ...submissionRunStatements(db, {
+      runId,
+      submissionId,
+      userId: launch.userId,
+      now: launch.now,
+      requireActive: true,
+    }),
   ]);
 
   if ((results[0]?.meta.changes ?? 0) === 0) {

@@ -311,6 +311,88 @@ export const badRequestResponseSchema = z.union([
   validationErrorResponseSchema,
 ]);
 
+const studyUseSchema = z.enum(['pilot', 'main']).meta({
+  description: 'pilot reads development cases; main reads released held-out cases.',
+  example: 'pilot',
+});
+
+const datasetFormatSchema = z.enum(['function', 'script']);
+
+const studyCaseSummarySchema = z.object({
+  caseKey: z.string(),
+  format: datasetFormatSchema,
+  submissionIds: z.array(z.string()),
+}).meta({ id: 'StudyCaseSummary' });
+
+export const studyCasesResponseSchema = z.object({
+  revisionId: z.string(),
+  use: studyUseSchema,
+  cases: z.array(studyCaseSummarySchema),
+}).meta({ id: 'StudyCasesResponse' });
+
+const studyTestResultSchema = z.object({
+  id: z.string(),
+  argumentsJson: z.string().nullable(),
+  expectedReturnJson: z.string().nullable(),
+  stdin: z.string().nullable(),
+  expectedStdout: z.string().nullable(),
+  status: z.string(),
+  actualJson: z.string().nullable(),
+  stdout: z.string().nullable(),
+  stderr: z.string(),
+  diagnostic: z.string().nullable(),
+});
+
+export const studyEvidenceResponseSchema = z.object({
+  use: studyUseSchema,
+  evidence: z.object({
+    format: datasetFormatSchema,
+    assignment: z.object({
+      title: z.string(),
+      description: z.string(),
+      entryPoint: z.string().nullable(),
+      rubric: z.array(rubricCriterionSchema),
+    }),
+    submission: z.object({
+      source: z.string(),
+      tests: z.array(studyTestResultSchema),
+    }),
+  }),
+}).meta({ id: 'StudyEvidenceResponse' });
+
+const keyEvidenceSchema = z.union([
+  z.object({
+    kind: z.literal('source'),
+    path: z.string(),
+    startLine: z.number().int(),
+    endLine: z.number().int(),
+  }),
+  z.object({ kind: z.literal('test'), testId: z.string() }),
+]);
+
+const scoringEntrySchema = z.object({
+  clean: z.boolean(),
+  errors: z.array(z.object({
+    id: z.string(),
+    requirement: z.string(),
+    evidence: z.array(keyEvidenceSchema),
+    note: z.string(),
+  })),
+});
+
+export const studyScoringResponseSchema = z.object({
+  use: studyUseSchema,
+  scoring: z.object({
+    revisionId: z.string(),
+    caseKey: z.string(),
+    targetedErrorIds: z.array(z.string()).nullable(),
+    submissions: z.array(z.object({
+      version: z.enum(['single', 'original', 'corrected']),
+      key: scoringEntrySchema,
+    })),
+  }),
+}).meta({ id: 'StudyScoringResponse' });
+
 const json = (schema: z.ZodTypeAny) => ({
   'application/json': { schema },
 });
@@ -330,6 +412,25 @@ const versionIdPath = z.object({
   assignmentId: z.string().meta({ param: { description: 'Assignment ID.' } }),
   versionId: z.string().meta({ param: { description: 'Exact assignment version ID.' } }),
 });
+
+const datasetRevisionPath = z.object({
+  revisionId: z.string().meta({ param: { description: 'Dataset revision ID.' } }),
+});
+const datasetEvidencePath = z.object({
+  revisionId: z.string().meta({ param: { description: 'Dataset revision ID.' } }),
+  submissionId: z.string().meta({ param: { description: 'Dataset submission ID within the eligible split.' } }),
+});
+const datasetScoringPath = z.object({
+  revisionId: z.string().meta({ param: { description: 'Dataset revision ID.' } }),
+  caseKey: z.string().meta({ param: { description: 'Stable dataset case key within the eligible split.' } }),
+});
+const studyUseQuery = {
+  in: 'query' as const,
+  name: 'use',
+  required: true,
+  description: 'pilot reads development cases; main reads released held-out cases.',
+  schema: { type: 'string' as const, enum: ['pilot', 'main'] },
+};
 
 const errorContent = {
   '400': { description: 'Invalid request or configuration.', content: json(badRequestResponseSchema) },
@@ -508,6 +609,40 @@ export function openApiDocument(): object {
           requestParams: { path: versionIdPath },
           responses: {
             '200': { description: 'Exact immutable version.', content: json(versionResponseSchema) },
+            ...errorContent,
+          },
+        },
+      },
+      '/api/datasets/{revisionId}/study/cases': {
+        get: {
+          summary: 'List study cases for the eligible split',
+          requestParams: { path: datasetRevisionPath },
+          parameters: [studyUseQuery],
+          responses: {
+            '200': { description: 'Eligible dataset cases.', content: json(studyCasesResponseSchema) },
+            ...errorContent,
+          },
+        },
+      },
+      '/api/datasets/{revisionId}/study/evidence/{submissionId}': {
+        get: {
+          summary: 'Read one submission study-evidence projection',
+          description: 'Returns only the exact source, assignment instructions, rubric, and supplied study tests with recorded results.',
+          requestParams: { path: datasetEvidencePath },
+          parameters: [studyUseQuery],
+          responses: {
+            '200': { description: 'Allowlisted evidence for one submission.', content: json(studyEvidenceResponseSchema) },
+            ...errorContent,
+          },
+        },
+      },
+      '/api/datasets/{revisionId}/study/scoring/{caseKey}': {
+        get: {
+          summary: 'Read the frozen scoring key and pair links for one case',
+          requestParams: { path: datasetScoringPath },
+          parameters: [studyUseQuery],
+          responses: {
+            '200': { description: 'The frozen key and targeted errors.', content: json(studyScoringResponseSchema) },
             ...errorContent,
           },
         },

@@ -43,6 +43,9 @@ describe('generated OpenAPI and docs access', () => {
       '/api/assignments/{assignmentId}',
       '/api/assignments/{assignmentId}/versions',
       '/api/assignments/{assignmentId}/versions/{versionId}',
+      '/api/datasets/{revisionId}/study/cases',
+      '/api/datasets/{revisionId}/study/evidence/{submissionId}',
+      '/api/datasets/{revisionId}/study/scoring/{caseKey}',
     ]));
     expect(document.components.securitySchemes.cookieAuth).toMatchObject({
       type: 'apiKey',

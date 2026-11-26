@@ -63,3 +63,30 @@ A scoring model that assesses whether each feedback claim is supported by the ru
 
 **Scoring key**  
 The expected errors and acceptable evidence established independently of AI feedback for an evaluation case.
+
+**Dataset revision**  
+An immutable imported corpus package with its case membership, exact sources, assignment snapshots, scoring key, verification record, and pinned study runs.
+
+**Package revision**  
+The `YYYY-MM-DD.N` label a dataset package uses to identify one import. Reusing the label with different contents is rejected; a correction uses a new label.
+
+**Study run attempt**  
+One launch of a dataset submission through the existing runner. A failed or interrupted attempt stays visible; a retry adds another attempt and freeze pins the successful one.
+
+**Sign-off**  
+A researcher's recorded verification of one case, bound to the case fingerprint and a note describing the evidence reviewed. A changed case requires a fresh sign-off.
+
+**Freeze**  
+Publishing an immutable dataset revision only after every case is signed off and every submission has a completed run with an outcome for every test.
+
+**Release**  
+The explicit act that opens a frozen revision's held-out split to the main study, after the study protocol is locked. Release is separate from freeze.
+
+**Development split**  
+Dataset cases the hosted pilot may use. Pilot study reads cannot include any other split.
+
+**Held-out split**  
+Dataset cases reserved for the main comparison. They stay authoring-only until a researcher releases the frozen revision after the study protocol is locked.
+
+**Study evidence**  
+The frozen, allowlisted projection of one submission: exact source, assignment instructions, rubric, and supplied study tests with recorded results. It excludes the counterpart source, pair links, the scoring key, and authoring verification evidence.

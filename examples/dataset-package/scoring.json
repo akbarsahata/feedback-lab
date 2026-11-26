@@ -1,0 +1,16 @@
+{
+  "datasetId": "example-intro-python",
+  "revision": "2026-11-27.1",
+  "cases": {
+    "demo-fn-clean": {
+      "submissions": {
+        "single": { "clean": true, "errors": [] }
+      }
+    },
+    "demo-io-clean": {
+      "submissions": {
+        "single": { "clean": true, "errors": [] }
+      }
+    }
+  }
+}

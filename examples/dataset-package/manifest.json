@@ -1,0 +1,75 @@
+{
+  "format": 1,
+  "datasetId": "example-intro-python",
+  "revision": "2026-11-27.1",
+  "assignments": {
+    "double-value": {
+      "title": "Double a value",
+      "description": "Implement double_value(value). Return twice the supplied integer.",
+      "format": "function",
+      "entryPoint": "double_value",
+      "criteria": [
+        {
+          "id": "returns-double",
+          "description": "Returns twice the input",
+          "expectedBehavior": "The returned integer is two times the argument."
+        }
+      ],
+      "tests": [
+        { "id": "positive", "arguments": "[2]", "expectedReturn": "4" },
+        { "id": "negative", "arguments": "[-3]", "expectedReturn": "-6" }
+      ]
+    },
+    "echo-line": {
+      "title": "Echo one line",
+      "description": "Read one line from standard input and print it unchanged.",
+      "format": "script",
+      "criteria": [
+        {
+          "id": "exact-text",
+          "description": "Echoes the exact line",
+          "expectedBehavior": "The printed text matches the input line."
+        }
+      ],
+      "tests": [
+        { "id": "short", "stdin": "hello\n", "expectedStdout": "hello\n" }
+      ]
+    }
+  },
+  "cases": [
+    {
+      "id": "demo-fn-clean",
+      "familyId": "family-double-value",
+      "split": "development",
+      "assignmentId": "double-value",
+      "submissions": [
+        {
+          "version": "single",
+          "path": "cases/demo-fn-clean/submission.py",
+          "assignmentRevision": "1"
+        }
+      ]
+    },
+    {
+      "id": "demo-io-clean",
+      "familyId": "family-echo-line",
+      "split": "development",
+      "assignmentId": "echo-line",
+      "submissions": [
+        {
+          "version": "single",
+          "path": "cases/demo-io-clean/submission.py",
+          "assignmentRevision": "1"
+        }
+      ]
+    }
+  ],
+  "submissions": {
+    "cases/demo-fn-clean/submission.py": {
+      "text": "def double_value(value):\n    return value * 2\n"
+    },
+    "cases/demo-io-clean/submission.py": {
+      "text": "line = input()\nprint(line)\n"
+    }
+  }
+}

@@ -73,7 +73,7 @@ export async function readSourceUpload(request: Request): Promise<SourceUpload> 
   };
 }
 
-async function readLimitedBody(request: Request, limit: number): Promise<Uint8Array> {
+export async function readLimitedBody(request: Request, limit: number): Promise<Uint8Array> {
   if (request.body === null) return new Uint8Array();
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];

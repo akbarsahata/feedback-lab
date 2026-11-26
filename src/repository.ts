@@ -243,30 +243,53 @@ export async function listVersions(
   }));
 }
 
+export interface AssignmentSnapshot {
+  assignmentId: string;
+  versionId: string;
+  statements: D1PreparedStatement[];
+}
+
+/**
+ * Builds the insert batch for a brand-new assignment and its first version.
+ * Callers that need assignment creation in a larger transaction can append
+ * these statements instead of calling createAssignment.
+ */
+export function assignmentSnapshotStatements(
+  db: D1Database,
+  config: ValidatedConfig,
+  userId: string,
+  now: string,
+): AssignmentSnapshot {
+  const assignmentId = crypto.randomUUID();
+  const versionId = crypto.randomUUID();
+  const rubricVersionId = crypto.randomUUID();
+  const testSuiteVersionId = crypto.randomUUID();
+
+  return {
+    assignmentId,
+    versionId,
+    statements: [
+      db
+        .prepare('INSERT INTO assignments (id, active_version_id, created_at, updated_at) VALUES (?, NULL, ?, ?)')
+        .bind(assignmentId, now, now),
+      ...rubricStatements(db, rubricVersionId, config, now),
+      ...testSuiteStatements(db, testSuiteVersionId, config, now),
+      versionInsert(db, {
+        id: versionId, assignmentId, versionNumber: 1, rubricVersionId, testSuiteVersionId,
+      }, config, userId, now),
+    ],
+  };
+}
+
 export async function createAssignment(
   db: D1Database,
   config: ValidatedConfig,
   userId: string,
   now: string = new Date().toISOString(),
 ): Promise<AssignmentVersionDetail> {
-  const assignmentId = crypto.randomUUID();
-  const versionId = crypto.randomUUID();
-  const rubricVersionId = crypto.randomUUID();
-  const testSuiteVersionId = crypto.randomUUID();
-
-  const statements: D1PreparedStatement[] = [
-    db
-      .prepare('INSERT INTO assignments (id, active_version_id, created_at, updated_at) VALUES (?, NULL, ?, ?)')
-      .bind(assignmentId, now, now),
-    ...rubricStatements(db, rubricVersionId, config, now),
-    ...testSuiteStatements(db, testSuiteVersionId, config, now),
-    versionInsert(db, {
-      id: versionId, assignmentId, versionNumber: 1, rubricVersionId, testSuiteVersionId,
-    }, config, userId, now),
-  ];
-
-  await db.batch(statements);
-  return getVersion(db, assignmentId, versionId);
+  const snapshot = assignmentSnapshotStatements(db, config, userId, now);
+  await db.batch(snapshot.statements);
+  return getVersion(db, snapshot.assignmentId, snapshot.versionId);
 }
 
 export interface RevisionResult {
