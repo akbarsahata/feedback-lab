@@ -159,6 +159,32 @@ describe('dataset package validation', () => {
     expect(errorKeys(result)).toContain('case.dev-fn-fix.submissions');
   });
 
+  it('rejects an unknown revision even when both members of the pair agree', () => {
+    const result = parseDatasetPackage(files(edit(validPackageBundle({ minimal: true }), (bundle) => {
+      const pair = bundle.manifest.cases.find((value: any) => value.id === 'dev-fn-fix');
+      for (const submission of pair.submissions) submission.assignmentRevision = '2';
+    })));
+    expect(errorKeys(result)).toContain('case.dev-fn-fix.assignmentRevision');
+  });
+
+  it('requires exactly one target and preserves the unrelated expected errors', () => {
+    const result = parseDatasetPackage(files(edit(validPackageBundle(), (bundle) => {
+      bundle.scoring.cases['dev-fn-partial'].submissions.corrected.errors[0].id = 'new-error';
+      bundle.scoring.cases['dev-io-partial'].targetedErrorIds.push('source-evident');
+    })));
+    expect(errorKeys(result)).toContain('scoring.dev-fn-partial.corrected.errors');
+    expect(errorKeys(result)).toContain('scoring.dev-io-partial.targetedErrorIds');
+  });
+
+  it('rejects script tests with nonstring text and rejects invalid assignment formats', () => {
+    const result = parseDatasetPackage(files(edit(validPackageBundle(), (bundle) => {
+      bundle.manifest.assignments['range-count'].format = 'unknown';
+      bundle.manifest.assignments['line-total'].tests[0].stdin = false;
+    })));
+    expect(errorKeys(result)).toContain('assignment.range-count.format');
+    expect(errorKeys(result)).toContain('assignment.line-total.tests.0.stdin');
+  });
+
   it('reports malformed test rows instead of dropping them', () => {
     const result = parseDatasetPackage(files(edit(validPackageBundle({ minimal: true }), (bundle) => {
       bundle.manifest.assignments['range-count'].tests.push('not-a-test');

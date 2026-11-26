@@ -140,7 +140,7 @@ HTML:
 | `GET /runs/:id` | Version-pinned run summary and line-numbered submitted source. |
 | `GET /runs/:id/tests/:testId` | Recorded expected/actual values, script stdin/stdout, separate stdout/stderr, diagnostics, and timings for one test. |
 | `GET /datasets` | Dataset library and the package import form. |
-| `POST /datasets/import` | Import a manifest, scoring key, and verification record as three JSON files. |
+| `POST /datasets/import` | Import a manifest, scoring key, verification record, and the referenced Python files. |
 | `GET /datasets/:revisionId` | Researcher review: coverage, keys, sources, sign-off state, attempts, freeze, and release. |
 | `POST /datasets/:revisionId/sign-off` | Record a researcher sign-off for one case fingerprint. |
 | `POST /datasets/:revisionId/runs` | Launch a pinned study run for one dataset submission. |
@@ -188,7 +188,7 @@ Researcher sign-off binds the current user and timestamp to a fingerprint of the
 
 Freeze pins the selected successful run on each submission in one guarded D1 batch. Failed attempts remain visible, and a retry uses a new submission/run pair. After freeze, study launches stop; corrections create a new revision while earlier revisions remain readable.
 
-Held-out release is separate. It records the researcher, timestamp, and the frozen study-protocol reference. The study read path enforces the split before listing or direct lookup:
+Held-out release is separate. It requires the lock recorded by #12 for that frozen revision, then records the releasing researcher, timestamp, and protocol reference. The study read path enforces the split before listing or direct lookup:
 
 | `use` | Split | When |
 | --- | --- | --- |
@@ -279,7 +279,7 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
 - Migration `0003_script_assignments.sql` rebuilds the cyclic assignment/run graph through parallel tables before renaming them. This avoids the D1 behavior where dropping a referenced parent can leave deferred foreign-key state even after a same-named replacement exists. The migration fixture applies only `0001`/`0002`, seeds function evidence and a newer active version, then applies `0003` and checks IDs, counts, and `foreign_key_check`.
 - Migration `0004_datasets.sql` adds dataset revisions, case and submission membership, attempts, sign-offs, and release records. Dataset tables link to existing assignment, submission, and run rows; they do not copy run evidence. A frozen revision is immutable and study reads select only its pinned runs.
 - The dataset package parser is pure and synchronous. The importer hashes canonicalized manifest/scoring/verification JSON, composes assignment snapshots and dataset rows in one D1 batch, and treats a digest mismatch under the same revision label as a conflict. Assignment creation and dataset import share `assignmentSnapshotStatements`.
-- Package sources are embedded in the manifest as UTF-8 text (or base64) rather than uploaded as individual `.py` files. This keeps one import request bounded and lets the importer validate every source before writing. Stored source bytes and SHA-256 are preserved exactly.
+- A package uploads individual UTF-8 `.py` files; earlier embedded-source manifests are still accepted. Stored source bytes and SHA-256 are preserved exactly.
 - The scoring key is versioned with the dataset revision; there is no separately mutable key. The canonical package digest identifies the imported manifest, key, and verification record together.
 - The restricted corpus, its key, verification record, and freeze identifiers are not committed to this public repository. See the local verification record [`docs/verification/issue-4-local.md`](docs/verification/issue-4-local.md) for what remains to be done in the authorized environment.
 - Tests use a small cleanup helper between cases because the installed Workers Vitest plugin did not isolate D1 storage between tests automatically. Production migrations never seed data.

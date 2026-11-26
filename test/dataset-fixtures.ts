@@ -210,6 +210,9 @@ function sourceFor(seed: CaseSeed, version: string, family: Family): string {
     };
     return `def ${family.entryPoint}(values, low, high):\n    ${bodies[bug] ?? bodies.clean!}\n`;
   }
+  if (family.assignmentId === 'classify-lines' && bug === 'clean') {
+    return "import sys\nfor line in sys.stdin:\n    try:\n        value = int(line)\n    except ValueError:\n        print('invalid')\n    else:\n        print('even' if value % 2 == 0 else 'odd')\n";
+  }
   const bodies: Record<string, string> = {
     clean: "import sys\n\ntotal = 0\nfor line in sys.stdin:\n    if line.strip():\n        total += int(line)\nprint(total)\n",
     'inclusive-total': "import sys\n\nlines = sys.stdin.read().splitlines()\nprint(sum(int(line) for line in lines[:-1]) if lines else 0)\n",

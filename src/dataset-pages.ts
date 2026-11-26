@@ -70,12 +70,13 @@ ${errorList}
   </section>
   <section class="panel pad">
     <h2>Import a package</h2>
-    <p class="muted small">Upload the manifest, scoring key, and verification record as three JSON files. Importing the same revision twice is a no-op; changing its contents is rejected.</p>
+    <p class="muted small">Upload manifest.json, scoring-key.json, verification.json, and the Python files named by the manifest. Importing the same revision twice is a no-op; changing its contents is rejected.</p>
     <form method="post" action="/datasets/import" enctype="multipart/form-data" class="stack">
       <input type="hidden" name="_csrf" value="${escapeHtml(user.csrfToken)}">
       <label>Manifest <input type="file" name="manifest" accept="application/json,.json" required></label>
       <label>Scoring key <input type="file" name="scoring" accept="application/json,.json" required></label>
       <label>Verification record <input type="file" name="verification" accept="application/json,.json" required></label>
+      <label>Python files <input type="file" name="sources" accept=".py" multiple></label>
       <div><button class="primary" type="submit">Import package</button></div>
     </form>
   </section>
@@ -105,24 +106,9 @@ export function datasetDetailPage(
     : `<div class="alert alert-error" role="alert"><strong>Freeze is blocked.</strong>
 <ul>${options.freezeIssues.map((issue) => `<li>${escapeHtml(issue)}</li>`).join('')}</ul></div>`;
 
-  const release = dataset.status === 'frozen'
-    ? dataset.releasedAt === null
-      ? `<section class="panel pad">
-    <h2>Release held-out cases</h2>
-    <p class="muted small">Release only after #12 freezes the study protocol. Pilot access always excludes held-out cases.</p>
-    <form method="post" action="/datasets/${escapeHtml(dataset.id)}/release" class="stack">
-      <input type="hidden" name="_csrf" value="${escapeHtml(user.csrfToken)}">
-      <label>Study protocol reference
-        <input name="studyProtocolRef" required placeholder="study-protocol/2026-11-30">
-      </label>
-      <div><button class="primary" type="submit">Release held-out split</button></div>
-    </form>
-  </section>`
-      : `<section class="panel pad">
-    <h2>Held-out cases released</h2>
-    <p class="small muted">Protocol <span class="mono">${escapeHtml(dataset.studyProtocolRef ?? '')}</span> · ${timestamp(dataset.releasedAt)} · ${escapeHtml(dataset.releasedBy?.email ?? '')}</p>
-  </section>`
-    : '';
+  const released = dataset.releasedAt !== null
+    && dataset.lockedProtocolRef !== null && dataset.lockedProtocolRef === dataset.studyProtocolRef;
+  const release = releasePanel(user, dataset, released);
 
   const freeze = dataset.status === 'draft'
     ? `<section class="panel pad">
@@ -139,7 +125,7 @@ export function datasetDetailPage(
   <div>
     <h1>${escapeHtml(dataset.datasetId)}</h1>
     <p class="muted">Revision ${escapeHtml(dataset.packageRevision)} · <span class="tag ${dataset.status === 'frozen' ? 'ok' : 'warn'}">${escapeHtml(dataset.status)}</span>
-    ${dataset.releasedAt === null ? '' : '<span class="tag info">held-out released</span>'}</p>
+    ${released ? '<span class="tag info">held-out released</span>' : ''}</p>
   </div>
   <a class="button" href="/datasets">All datasets</a>
 </div>
@@ -159,7 +145,7 @@ ${freezeIssues}
       <div class="pad small muted">
         <p>Clean = clean single. Fixed = targeted fix leaves it clean. Partial = targeted fix leaves an unrelated error.</p>
         <p>Imported ${timestamp(dataset.importedAt)} by ${escapeHtml(dataset.importedBy.email)}.${dataset.frozenAt === null ? '' : ` Frozen ${timestamp(dataset.frozenAt)} by ${escapeHtml(dataset.frozenBy?.email ?? '')}.`}</p>
-        <p>Package digest <span class="mono">${escapeHtml(dataset.packageDigest.slice(0, 20))}…</span></p>
+        <p class="prewrap">Package digest <span class="mono">${escapeHtml(dataset.packageDigest)}</span></p>
       </div>
     </section>
     ${freeze}
@@ -168,6 +154,31 @@ ${freezeIssues}
 </div>`;
 
   return shell({ title: `${dataset.datasetId} · ${dataset.packageRevision}`, user, body });
+}
+
+function releasePanel(user: SessionUser, dataset: DatasetRevisionDetail, released: boolean): string {
+  if (dataset.status !== 'frozen') return '';
+  if (released) {
+    return `<section class="panel pad">
+    <h2>Held-out cases released</h2>
+    <p class="small muted">Protocol <span class="mono">${escapeHtml(dataset.studyProtocolRef)}</span> · ${timestamp(dataset.releasedAt)} · ${escapeHtml(dataset.releasedBy?.email ?? '')}</p>
+  </section>`;
+  }
+  if (dataset.lockedProtocolRef === null || dataset.releasedAt !== null) {
+    return `<section class="panel pad">
+    <h2>Held-out cases locked</h2>
+    <p class="muted small">Waiting for a matching study-protocol lock from #12.</p>
+  </section>`;
+  }
+  return `<section class="panel pad">
+    <h2>Release held-out cases</h2>
+    <p class="muted small">#12 locked protocol <span class="mono">${escapeHtml(dataset.lockedProtocolRef)}</span> for this revision. Pilot access always excludes held-out cases.</p>
+    <form method="post" action="/datasets/${escapeHtml(dataset.id)}/release" class="stack">
+      <input type="hidden" name="_csrf" value="${escapeHtml(user.csrfToken)}">
+      <input type="hidden" name="studyProtocolRef" value="${escapeHtml(dataset.lockedProtocolRef)}">
+      <div><button class="primary" type="submit">Release held-out split</button></div>
+    </form>
+  </section>`;
 }
 
 function caseCard(
@@ -196,7 +207,8 @@ function caseCard(
     : `<p class="small muted">Targeted: <span class="mono">${escapeHtml(datasetCase.pairTargetedErrorIds.join(', '))}</span></p>`;
   const checks = datasetCase.authoringChecks.length === 0
     ? ''
-    : `<p class="small muted">Authoring checks: ${datasetCase.authoringChecks.map((check) => `${escapeHtml(check.id)} (${escapeHtml(check.status)})`).join(', ')}</p>`;
+    : `<h3>Authoring checks</h3><ul class="small">${datasetCase.authoringChecks.map((check) =>
+        `<li>${escapeHtml(check.id)} (${escapeHtml(check.status)}): ${escapeHtml(check.note)}</li>`).join('')}</ul>`;
   const rubric = datasetCase.assignment.rubric.map((criterion) => `<li><strong>${escapeHtml(criterion.id)}</strong> ${escapeHtml(criterion.description)} — ${escapeHtml(criterion.expectedBehavior)}</li>`).join('');
   const tests = datasetCase.assignment.tests.map((test) => `<li class="mono">${escapeHtml(test.id)}${test.stdin === undefined
     ? ` · args ${escapeHtml(test.argumentsJson)} · expected ${escapeHtml(test.expectedReturnJson)}`
@@ -210,6 +222,7 @@ function caseCard(
     <div class="pad">
     <details><summary class="small"><strong>Task, rubric, and supplied study tests</strong></summary>
       <p class="end">${escapeHtml(datasetCase.assignment.description)}</p>
+      ${datasetCase.packageAssignmentRevision === null ? '' : `<p class="small">Package assignment revision ${escapeHtml(datasetCase.packageAssignmentRevision)}</p>`}
       ${datasetCase.assignment.entryPoint === null ? '' : `<p class="small">Entry point <span class="mono">${escapeHtml(datasetCase.assignment.entryPoint)}</span></p>`}
       <ul class="small">${rubric}</ul>
       <ul class="small">${tests}</ul>
@@ -232,7 +245,7 @@ function submissionRow(
   const frozen = submission.frozenRunId === null
     ? ''
     : `<div class="small"><span class="tag ok">Pinned run</span> <a href="/runs/${escapeHtml(submission.frozenRunId)}" class="mono">${escapeHtml(submission.frozenRunId.slice(0, 8))}</a></div>`;
-  const launch = dataset.status === 'draft'
+  const launch = dataset.status === 'draft' && (submission.attempts.at(-1)?.runStatus ?? 'incomplete') === 'incomplete'
     ? `<form method="post" action="/datasets/${escapeHtml(dataset.id)}/runs">
         <input type="hidden" name="_csrf" value="${escapeHtml(user.csrfToken)}">
         <input type="hidden" name="submissionId" value="${escapeHtml(submission.id)}">
@@ -244,7 +257,10 @@ function submissionRow(
     : `<span class="tag warn">${submission.key.errors.length} expected error${submission.key.errors.length === 1 ? '' : 's'}</span>`;
   const errors = submission.key.errors.length === 0
     ? ''
-    : `<ul class="small">${submission.key.errors.map((error) => `<li><span class="mono">${escapeHtml(error.id)}</span> (${escapeHtml(error.requirement)}): ${escapeHtml(error.note)}</li>`).join('')}</ul>`;
+    : `<ul class="small">${submission.key.errors.map((error) => `<li><span class="mono">${escapeHtml(error.id)}</span> (${escapeHtml(error.requirement)}): ${escapeHtml(error.note)}
+      <ul>${error.evidence.map((item) => item.kind === 'test'
+        ? `<li>Study test: ${escapeHtml(item.testId)}</li>`
+        : `<li>Source lines ${item.startLine}–${item.endLine} (${escapeHtml(item.path)})</li>`).join('')}</ul></li>`).join('')}</ul>`;
 
   return `<div class="row-card">
     <div class="row-head">
@@ -257,7 +273,7 @@ function submissionRow(
     ${errors}
     ${attempts}
     ${frozen}
-    <p class="small muted">Source SHA-256 <span class="mono">${escapeHtml(submission.sha256.slice(0, 16))}…</span> · ${escapeHtml(datasetCase.format)}</p>
+    <p class="small muted prewrap">Source SHA-256 <span class="mono">${escapeHtml(submission.sha256)}</span> · ${escapeHtml(datasetCase.format)}</p>
     <details><summary class="small"><strong>Exact source</strong></summary><pre class="code">${escapeHtml(submission.source)}</pre></details>
   </div>`;
 }

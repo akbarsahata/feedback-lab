@@ -6,6 +6,7 @@ import {
   type RawConfig,
 } from './config';
 import { parseJsonValue } from './json';
+import { EXECUTION_TEST_STATUSES } from './runs';
 
 const emailSchema = z.string().meta({
   description: 'Provisioned account email address.',
@@ -336,7 +337,7 @@ const studyTestResultSchema = z.object({
   expectedReturnJson: z.string().nullable(),
   stdin: z.string().nullable(),
   expectedStdout: z.string().nullable(),
-  status: z.string(),
+  status: z.enum(EXECUTION_TEST_STATUSES),
   actualJson: z.string().nullable(),
   stdout: z.string().nullable(),
   stderr: z.string(),
@@ -387,6 +388,7 @@ export const studyScoringResponseSchema = z.object({
     caseKey: z.string(),
     targetedErrorIds: z.array(z.string()).nullable(),
     submissions: z.array(z.object({
+      submissionId: z.string(),
       version: z.enum(['single', 'original', 'corrected']),
       key: scoringEntrySchema,
     })),

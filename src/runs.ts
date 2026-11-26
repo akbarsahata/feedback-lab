@@ -28,26 +28,17 @@ export const RUNNING_TIMEOUT_MS = 15 * 60 * 1000;
 
 export type RunStatus = 'queued' | 'running' | 'complete' | 'incomplete';
 
-export type TestStatus =
-  | 'pending'
-  | 'running'
-  | 'pass'
-  | 'mismatch'
-  | 'execution_error'
-  | 'timed_out'
-  | 'memory_limit'
-  | 'output_limit'
-  | 'infrastructure_failure'
-  | 'not_run';
-
-export const EXECUTION_OUTCOMES: ReadonlySet<TestStatus> = new Set([
+export const EXECUTION_TEST_STATUSES = [
   'pass',
   'mismatch',
   'execution_error',
   'timed_out',
   'memory_limit',
   'output_limit',
-]);
+] as const;
+export type ExecutionTestStatus = typeof EXECUTION_TEST_STATUSES[number];
+export type TestStatus = ExecutionTestStatus | 'pending' | 'running' | 'infrastructure_failure' | 'not_run';
+export const EXECUTION_OUTCOMES: ReadonlySet<TestStatus> = new Set(EXECUTION_TEST_STATUSES);
 
 export class StaleLaunchError extends Error {
   constructor() {

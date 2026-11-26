@@ -12,19 +12,18 @@ import {
   recordDatasetSignoff,
   releaseDataset,
 } from './dataset-repository';
-import { parseDatasetPackage } from './dataset-package';
+import { MAX_DATASET_SOURCES, parseDatasetPackage, type DatasetPackageFiles } from './dataset-package';
 import { dispatchRun } from './dispatch';
+import { formString } from './forms';
 import { requireResearcher } from './guard';
 import { messagePage } from './html';
 import { htmlResponse, methodNotAllowed, redirect } from './http';
 import { datasetDetailPage, datasetLibraryPage, type DatasetPageNotice } from './dataset-pages';
-import { readLimitedBody } from './upload';
+import { readLimitedBody, UploadError } from './upload';
+import { parseJsonValue } from './json';
 
 const DETAIL_PATH = /^\/datasets\/([^/]+)$/;
-const SIGN_OFF_PATH = /^\/datasets\/([^/]+)\/sign-off$/;
-const RUNS_PATH = /^\/datasets\/([^/]+)\/runs$/;
-const FREEZE_PATH = /^\/datasets\/([^/]+)\/freeze$/;
-const RELEASE_PATH = /^\/datasets\/([^/]+)\/release$/;
+const ACTION_PATH = /^\/datasets\/([^/]+)\/(sign-off|runs|freeze|release)$/;
 const MAX_IMPORT_BYTES = 4 * 1024 * 1024;
 
 export async function handleDatasetsHtml(
@@ -61,28 +60,19 @@ async function routeDatasetsHtml(
     return importPackage(request, env, session);
   }
 
-  const signOff = SIGN_OFF_PATH.exec(path);
-  if (signOff !== null) {
+  const action = ACTION_PATH.exec(path);
+  if (action !== null) {
     if (request.method !== 'POST') return methodNotAllowed('POST');
-    return signOffCase(request, env, session, signOff[1] as string);
-  }
-
-  const runs = RUNS_PATH.exec(path);
-  if (runs !== null) {
-    if (request.method !== 'POST') return methodNotAllowed('POST');
-    return launchStudyRun(request, env, session, runs[1] as string);
-  }
-
-  const freeze = FREEZE_PATH.exec(path);
-  if (freeze !== null) {
-    if (request.method !== 'POST') return methodNotAllowed('POST');
-    return freezeRevision(request, env, session, freeze[1] as string);
-  }
-
-  const release = RELEASE_PATH.exec(path);
-  if (release !== null) {
-    if (request.method !== 'POST') return methodNotAllowed('POST');
-    return releaseRevision(request, env, session, release[1] as string);
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
+      return blockedPage(session);
+    }
+    if (authenticatedPostError(request, session, formString(form, '_csrf')) !== null) {
+      return blockedPage(session);
+    }
+    return applyDatasetAction(env, session, action[1]!, action[2]!, form);
   }
 
   const detail = DETAIL_PATH.exec(path);
@@ -137,39 +127,56 @@ async function importPackage(
       headers: { 'content-type': request.headers.get('content-type') ?? '' },
       body,
     }).formData();
-  } catch {
+  } catch (error) {
+    const tooLarge = error instanceof UploadError && error.status === 413;
     return htmlResponse(
       datasetLibraryPage(session, await listDatasets(env.DB), {
-        uploadErrors: ['The package form could not be read. Choose the three JSON files again.'],
+        uploadErrors: [tooLarge
+          ? 'The package upload is too large.'
+          : 'The package form could not be read. Choose the package files again.'],
       }),
-      422,
+      tooLarge ? 413 : 422,
     );
   }
   if (authenticatedPostError(request, session, formString(form, '_csrf')) !== null) {
     return blockedPage(session);
   }
 
-  const parsedFiles: Record<'manifest' | 'scoring' | 'verification', unknown> = {
+  const parsedFiles: DatasetPackageFiles = {
     manifest: null,
     scoring: null,
     verification: null,
   };
   const uploadErrors: string[] = [];
   for (const name of ['manifest', 'scoring', 'verification'] as const) {
-    const file = form.get(name);
-    if (!(file instanceof File)) {
-      uploadErrors.push(`Choose a ${name} JSON file.`);
-      continue;
-    }
-    if (file.size > MAX_IMPORT_BYTES) {
-      uploadErrors.push(`The ${name} file is too large.`);
+    const [file, ...duplicates] = form.getAll(name);
+    if (!(file instanceof File) || duplicates.length > 0) {
+      uploadErrors.push(`Choose exactly one ${name} JSON file.`);
       continue;
     }
     try {
-      parsedFiles[name] = JSON.parse(await file.text());
+      const source = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false })
+        .decode(await file.arrayBuffer());
+      parseJsonValue(source); // Reject duplicate keys and excessive nesting before hashing.
+      parsedFiles[name] = JSON.parse(source);
     } catch {
       uploadErrors.push(`The ${name} file is not valid JSON.`);
     }
+  }
+  const pythonFiles = form.getAll('sources');
+  if (pythonFiles.length > MAX_DATASET_SOURCES) {
+    uploadErrors.push(`Use at most ${MAX_DATASET_SOURCES} Python files.`);
+  } else {
+    const sources = new Map<string, Uint8Array>();
+    for (const file of pythonFiles) {
+      if (file instanceof File && file.name === '' && file.size === 0) continue;
+      if (!(file instanceof File) || sources.has(file.name) || !/^[a-z0-9_-]+\.py$/.test(file.name)) {
+        uploadErrors.push('Python files need unique, flat filenames ending in .py.');
+        break;
+      }
+      sources.set(file.name, new Uint8Array(await file.arrayBuffer()));
+    }
+    if (sources.size > 0) parsedFiles.sources = sources;
   }
   if (uploadErrors.length > 0) {
     return htmlResponse(
@@ -221,87 +228,37 @@ async function importPackage(
   }
 }
 
-async function signOffCase(
-  request: Request,
+async function applyDatasetAction(
   env: Env,
   session: SessionUser,
   revisionId: string,
+  action: string,
+  form: FormData,
 ): Promise<Response> {
-  const form = await request.formData();
-  if (authenticatedPostError(request, session, formString(form, '_csrf')) !== null) {
-    return blockedPage(session);
-  }
-  const caseKey = formString(form, 'caseKey');
-  const evidenceNote = formString(form, 'evidenceNote');
+  const now = new Date().toISOString();
   try {
-    await recordDatasetSignoff(
-      env.DB,
-      revisionId,
-      caseKey,
-      session.id,
-      evidenceNote,
-      new Date().toISOString(),
-    );
-  } catch (error) {
-    if (error instanceof DatasetStateError || error instanceof DatasetNotFoundError) {
-      return htmlResponse(
-        datasetDetailPage(session, await getDatasetRevision(env.DB, revisionId), {
-          notice: { kind: 'error', message: error.message },
-        }),
-        error instanceof DatasetNotFoundError ? 404 : 409,
-      );
+    switch (action) {
+      case 'sign-off':
+        await recordDatasetSignoff(
+          env.DB, revisionId, formString(form, 'caseKey'), session.id, formString(form, 'evidenceNote'), now,
+        );
+        return redirect(`/datasets/${revisionId}?notice=signed-off`);
+      case 'runs': {
+        const { runId } = await launchDatasetRun(
+          env.DB, revisionId, formString(form, 'submissionId'), session.id, now,
+        );
+        await dispatchRun(env, runId);
+        return redirect(`/runs/${runId}`);
+      }
+      case 'freeze':
+        await freezeDataset(env.DB, revisionId, session.id, now);
+        return redirect(`/datasets/${revisionId}?notice=frozen`);
+      case 'release':
+        await releaseDataset(env.DB, revisionId, session.id, formString(form, 'studyProtocolRef'), now);
+        return redirect(`/datasets/${revisionId}?notice=released`);
+      default:
+        return notFoundPage(session);
     }
-    throw error;
-  }
-  return redirect(`/datasets/${revisionId}?notice=signed-off`);
-}
-
-async function launchStudyRun(
-  request: Request,
-  env: Env,
-  session: SessionUser,
-  revisionId: string,
-): Promise<Response> {
-  const form = await request.formData();
-  if (authenticatedPostError(request, session, formString(form, '_csrf')) !== null) {
-    return blockedPage(session);
-  }
-  const submissionId = formString(form, 'submissionId');
-  try {
-    const launched = await launchDatasetRun(
-      env.DB,
-      revisionId,
-      submissionId,
-      session.id,
-      new Date().toISOString(),
-    );
-    await dispatchRun(env, launched.runId);
-    return redirect(`/runs/${launched.runId}`);
-  } catch (error) {
-    if (error instanceof DatasetStateError || error instanceof DatasetNotFoundError) {
-      return htmlResponse(
-        datasetDetailPage(session, await getDatasetRevision(env.DB, revisionId), {
-          notice: { kind: 'error', message: error.message },
-        }),
-        error instanceof DatasetNotFoundError ? 404 : 409,
-      );
-    }
-    throw error;
-  }
-}
-
-async function freezeRevision(
-  request: Request,
-  env: Env,
-  session: SessionUser,
-  revisionId: string,
-): Promise<Response> {
-  const form = await request.formData();
-  if (authenticatedPostError(request, session, formString(form, '_csrf')) !== null) {
-    return blockedPage(session);
-  }
-  try {
-    await freezeDataset(env.DB, revisionId, session.id, new Date().toISOString());
   } catch (error) {
     if (error instanceof DatasetFreezeError) {
       return htmlResponse(
@@ -312,49 +269,16 @@ async function freezeRevision(
         409,
       );
     }
-    if (error instanceof DatasetStateError || error instanceof DatasetNotFoundError) {
+    if (error instanceof DatasetStateError) {
       return htmlResponse(
         datasetDetailPage(session, await getDatasetRevision(env.DB, revisionId), {
           notice: { kind: 'error', message: error.message },
         }),
-        error instanceof DatasetNotFoundError ? 404 : 409,
+        409,
       );
     }
     throw error;
   }
-  return redirect(`/datasets/${revisionId}?notice=frozen`);
-}
-
-async function releaseRevision(
-  request: Request,
-  env: Env,
-  session: SessionUser,
-  revisionId: string,
-): Promise<Response> {
-  const form = await request.formData();
-  if (authenticatedPostError(request, session, formString(form, '_csrf')) !== null) {
-    return blockedPage(session);
-  }
-  try {
-    await releaseDataset(
-      env.DB,
-      revisionId,
-      session.id,
-      formString(form, 'studyProtocolRef'),
-      new Date().toISOString(),
-    );
-  } catch (error) {
-    if (error instanceof DatasetStateError || error instanceof DatasetNotFoundError) {
-      return htmlResponse(
-        datasetDetailPage(session, await getDatasetRevision(env.DB, revisionId), {
-          notice: { kind: 'error', message: error.message },
-        }),
-        error instanceof DatasetNotFoundError ? 404 : 409,
-      );
-    }
-    throw error;
-  }
-  return redirect(`/datasets/${revisionId}?notice=released`);
 }
 
 function blockedPage(session: SessionUser): Response {
@@ -377,9 +301,4 @@ function notFoundPage(session: SessionUser): Response {
     }),
     404,
   );
-}
-
-function formString(form: FormData, name: string): string {
-  const value = form.get(name);
-  return typeof value === 'string' ? value : '';
 }

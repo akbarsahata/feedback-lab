@@ -22,8 +22,10 @@ import { validPackageBundle, type PackageBundle } from './dataset-fixtures';
 import {
   DATASET_NOW as NOW,
   passingRunner,
+  recordProtocolLock,
   runEverySubmission,
   signEveryCase,
+  STUDY_PROTOCOL,
 } from './dataset-helpers';
 
 async function imported(
@@ -133,7 +135,7 @@ describe('dataset repository', () => {
     );
   });
 
-  it('keeps failed attempts and pins the successful retry', async () => {
+  it('keeps failed attempts alongside the successful retry', async () => {
     const researcher = await seedUser();
     const { revisionId } = await imported(validPackageBundle({ minimal: true }), researcher);
     const detail = await getDatasetRevision(env.DB, revisionId);
@@ -154,6 +156,32 @@ describe('dataset repository', () => {
     const attempts = after.cases[0]!.submissions[0]!.attempts;
     expect(attempts.map((attempt) => attempt.runStatus)).toEqual(['incomplete', 'complete']);
     expect(await countRows('dataset_attempts')).toBe(2);
+    await expect(launchDatasetRun(env.DB, revisionId, submission.id, researcher.id, NOW))
+      .rejects.toBeInstanceOf(DatasetStateError);
+  });
+
+  it('cannot freeze two conflicting drafts for the same corpus', async () => {
+    const researcher = await seedUser();
+    const first = await imported(validPackageBundle(), researcher);
+    const other = validPackageBundle();
+    for (const file of [other.manifest, other.scoring, other.verification]) file.revision = '2026-11-28.1';
+    for (const datasetCase of other.manifest.cases) {
+      datasetCase.split = datasetCase.split === 'development' ? 'held_out' : 'development';
+    }
+    const second = await imported(other, researcher);
+    for (const { revisionId } of [first, second]) {
+      await signEveryCase(revisionId, researcher.id);
+      await runEverySubmission(revisionId, researcher.id);
+    }
+    const freezes = await Promise.allSettled([first, second].map(({ revisionId }) =>
+      freezeDataset(env.DB, revisionId, researcher.id, NOW)));
+    expect(freezes.filter((freeze) => freeze.status === 'fulfilled')).toHaveLength(1);
+    const blocked = freezes.findIndex((freeze) => freeze.status === 'rejected');
+    expect(freezes[blocked]).toMatchObject({ reason: { issues: [expect.stringContaining('other split')] } });
+    const draft = await getDatasetRevision(env.DB, [first, second][blocked]!.revisionId);
+    expect(draft.status).toBe('draft');
+    expect(draft.cases.every((datasetCase) =>
+      datasetCase.submissions.every((submission) => submission.frozenRunId === null))).toBe(true);
   });
 
   it('enforces pilot and held-out access and keeps evidence free of keys and pair links', async () => {
@@ -183,7 +211,8 @@ describe('dataset repository', () => {
       DatasetNotFoundError,
     );
 
-    await releaseDataset(env.DB, revisionId, researcher.id, 'study-protocol/2026-11-30', NOW);
+    await recordProtocolLock(revisionId, researcher.id);
+    await releaseDataset(env.DB, revisionId, researcher.id, STUDY_PROTOCOL, NOW);
     const main = await listStudyCases(env.DB, revisionId, 'main');
     expect(main.length).toBe(6);
 
@@ -204,6 +233,7 @@ describe('dataset repository', () => {
     expect(JSON.stringify(evidence)).not.toContain('held-fn-partial');
 
     const scoring = await getScoringRead(env.DB, revisionId, 'main', 'held-fn-partial');
+    expect(scoring.submissions.map((submission) => submission.submissionId)).toEqual(mainCase.submissionIds);
     expect(scoring.targetedErrorIds).toEqual(['case-sensitive']);
     expect(scoring.submissions.map((submission) => submission.version)).toEqual([
       'corrected',
@@ -218,9 +248,10 @@ describe('dataset repository', () => {
     next.manifest.revision = '2026-11-28.1';
     next.scoring.revision = '2026-11-28.1';
     next.verification.revision = '2026-11-28.1';
-    const moved = next.manifest.cases.find((value: any) => value.id === 'held-fn-clean');
-    moved.split = 'development';
-    moved.familyId = 'family-first-match-copy';
+    for (const moved of next.manifest.cases.filter((value: any) => value.assignmentId === 'first-match')) {
+      moved.split = 'development';
+      moved.familyId = 'family-first-match-copy';
+    }
     await expect(imported(next, researcher)).rejects.toBeInstanceOf(DatasetStateError);
   });
 });

@@ -1,11 +1,12 @@
 # Dataset package format
 
-A dataset package is three JSON files plus the Python sources embedded in the manifest. The researcher imports all three through `/datasets`.
+A dataset package is three JSON files plus the individual UTF-8 `.py` source files. A researcher uploads them together through `/datasets`.
 
 | File | Contains | Enters model input? |
 | --- | --- | --- |
-| `manifest.json` | Dataset identity, assignment definitions, split and family membership, exact sources, and pair membership | Only the source and assignment data for one scored submission |
-| `scoring.json` | Expected errors, acceptable evidence, clean designations, and targeted error IDs | No |
+| `manifest.json` | Dataset identity, assignment definitions, split and family membership, and references to source files | Only assignment data for one scored submission |
+| `.py` files | Exact source bytes | Only the file for the submission being evaluated |
+| `scoring-key.json` | Expected errors, acceptable evidence, clean designations, and targeted error IDs | No |
 | `verification.json` | Authoring checks and their results | No |
 
 The importer validates the package before writing any row. Errors are reported by case, assignment, or package field.
@@ -19,6 +20,7 @@ The importer validates the package before writing any row. Errors are reported b
   "revision": "2026-11-27.1",
   "assignments": {
     "range-count": {
+      "revision": "1",
       "title": "Count values inside a range",
       "description": "Implement count_in_range(values, low, high). Return how many values are inside the inclusive range.",
       "format": "function",
@@ -27,7 +29,7 @@ The importer validates the package before writing any row. Errors are reported b
         { "id": "inclusive-bounds", "description": "Inclusive bounds", "expectedBehavior": "Both endpoints count as inside." }
       ],
       "tests": [
-        { "id": "both-bounds", "arguments": "[[1, 2, 3, 4], 2, 3]", "expectedReturn": "2" }
+        { "id": "both-bounds", "argumentsJson": "[[1, 2, 3, 4], 2, 3]", "expectedReturnJson": "2" }
       ]
     }
   },
@@ -40,23 +42,20 @@ The importer validates the package before writing any row. Errors are reported b
       "submissions": [
         {
           "version": "single",
-          "path": "cases/dev-fn-clean/submission.py",
+          "path": "s001.py",
           "assignmentRevision": "1"
         }
       ]
     }
-  ],
-  "submissions": {
-    "cases/dev-fn-clean/submission.py": { "text": "def count_in_range(values, low, high):\n    return sum(1 for value in values if low <= value <= high)\n" }
-  }
+  ]
 }
 ```
 
 - `revision` uses `YYYY-MM-DD.N`. Importing the same dataset ID and revision twice is a no-op when the content digest matches; changed content under the same label is rejected.
-- Each assignment is inserted as a new immutable assignment snapshot. `assignmentRevision` is a package label; a pair must use one revision on both submissions.
+- Each assignment definition declares its package revision (defaults to `1`) and is imported as an immutable assignment snapshot. The `assignmentRevision` on each submission must match that definition. Every case using an assignment must declare the same assignment family, including both versions of a pair.
 - A case is either one `single` submission or an `original`/`corrected` pair. A submission source is stored exactly as UTF-8.
 - `split` is `development` or `held_out`. A family, or a source file, cannot appear in both splits.
-- Sources are UTF-8 text by default. Use `{ "text": "<base64>", "encoding": "base64" }` when a file cannot be represented as a JSON string.
+- Use unique, flat `.py` filenames with lowercase letters, digits, hyphens, or underscores. Use neutral names so filenames do not describe an error or correction. For compatibility, previously prepared manifests can still use the embedded `submissions` object, with `{ "text": "..." }` or `{ "text": "...", "encoding": "base64" }` entries. Select one source format per package.
 - The importer stores the exact decoded bytes, including a UTF-8 BOM, and hashes those bytes.
 
 ## Scoring key
@@ -76,7 +75,7 @@ The importer validates the package before writing any row. Errors are reported b
               "id": "off-by-one",
               "requirement": "inclusive-bounds",
               "evidence": [
-                { "kind": "source", "path": "cases/dev-fn-fix/original.py", "startLine": 2, "endLine": 2 },
+                { "kind": "source", "path": "s002.py", "startLine": 2, "endLine": 2 },
                 { "kind": "test", "testId": "both-bounds" }
               ],
               "note": "The upper bound is excluded."
@@ -90,7 +89,7 @@ The importer validates the package before writing any row. Errors are reported b
 }
 ```
 
-- A single case may be clean or buggy; a scored single with errors is allowed. A pair names at least one `targetedErrorId`; that error must appear in the original and be absent from the corrected key. Any unrelated surviving error keeps its identity on the corrected submission.
+- A single case may be clean or buggy. A pair names exactly one `targetedErrorId`. The corrected key must remove that error and keep the IDs and requirements of all unrelated errors.
 - Evidence references either a line range in that submission's source or a supplied study test. Rubric criterion IDs and test IDs must resolve against the assignment.
 - Expected errors are established independently of either feedback workflow.
 
@@ -114,11 +113,15 @@ Authoring checks are separate from the supplied study tests. They never enter th
 
 ## Researcher workflow
 
-1. Open `/datasets` and import the three files. Fix any reported case-level errors.
+1. Open `/datasets` and import the three JSON files and the referenced `.py` files. Fix any reported case-level errors.
 2. Review each case on `/datasets/:revisionId`: exact source, task, rubric, supplied tests, source hash, scoring key, authoring checks, and study-run attempts. Record the evidence you checked in the sign-off form and sign off each case.
 3. Use **Record study run** for every submission version. Runs use the existing pinned runner and limits. A failed assertion is valid evidence; an infrastructure failure or an unfinished test blocks freeze. Retry an incomplete run; failed attempts are retained.
 4. Freeze. Freeze requires all 12 coverage cells (`development`/`held_out` × `function`/`script` × clean/fixed/partial), a signed-off case fingerprint for every case, a completed run with an outcome for every test of the pinned suite, every clean submission passing every supplied study test, and a buggy all-tests-pass submission in each split and format.
-5. Release held-out cases only after the study protocol is frozen. Store the protocol reference; release is separate from freeze.
+5. Release held-out cases only after #12 freezes the study protocol. The action becomes available once the trusted #12 workflow records the lock for that exact revision.
+
+The #12 workflow must insert `revision_id`, `protocol_ref`, `locked_by`, and `locked_at` into `dataset_protocol_locks` as part of committing its immutable protocol. #4 never creates this record through a researcher form. The separate release action records who released the revision and when.
+
+Release records created before migration `0005` are not sufficient for main-study reads. They require a matching protocol lock as well.
 
 A correction is a new `revision`. Previous revisions remain frozen, resolve their pinned runs, and stay readable by study code that used them.
 

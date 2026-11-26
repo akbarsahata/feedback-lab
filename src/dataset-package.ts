@@ -19,6 +19,7 @@ export interface DatasetPackageFiles {
   manifest: unknown;
   scoring: unknown;
   verification: unknown;
+  sources?: ReadonlyMap<string, Uint8Array>;
 }
 
 export interface DatasetPackageError {
@@ -71,6 +72,7 @@ export interface ParsedDatasetCase {
 
 export interface ParsedAssignment {
   id: string;
+  revision: string;
   config: ValidatedConfig;
 }
 
@@ -140,7 +142,10 @@ export function parseDatasetPackage(files: DatasetPackageFiles): DatasetPackageR
   }
 
   const assignments = parseAssignments(manifest.assignments, errors);
-  const sources = sourceFiles(manifest.submissions, errors);
+  if (files.sources !== undefined && manifest.submissions !== undefined) {
+    errors.add('submissions', 'Choose separate Python files or embedded sources, not both.');
+  }
+  const sources = sourceFiles(manifest.submissions, files.sources, errors);
   const cases = parseCases(manifest.cases, assignments, sources, errors);
   attachKeys(cases, assignments, scoring, errors);
   attachVerification(cases, verification, errors);
@@ -182,6 +187,14 @@ function parseAssignments(
     }
     const assignment = record(raw, `assignment.${id}`, errors);
     if (assignment === null) continue;
+    if (assignment.format !== undefined && assignment.format !== 'function' && assignment.format !== 'script') {
+      errors.add(`assignment.${id}.format`, 'Choose function or script.');
+      continue;
+    }
+    const revision = assignment.revision === undefined ? '1' : text(assignment.revision);
+    if (!ID_PATTERN.test(revision)) {
+      errors.add(`assignment.${id}.revision`, 'Use a stable assignment revision label.');
+    }
     if (Array.isArray(assignment.criteria)) {
       for (const [index, criterion] of assignment.criteria.entries()) {
         if (!isRecord(criterion) || text(criterion.id) === '') {
@@ -193,6 +206,14 @@ function parseAssignments(
       for (const [index, test] of assignment.tests.entries()) {
         if (!isRecord(test) || text(test.id) === '') {
           errors.add(`assignment.${id}.tests.${index}`, 'Use a test object with a stable ID.');
+          continue;
+        }
+        if (assignment.format === 'script') {
+          for (const field of ['stdin', 'expectedStdout'] as const) {
+            if (typeof test[field] !== 'string') {
+              errors.add(`assignment.${id}.tests.${index}.${field}`, 'Use a string, or an explicit empty string.');
+            }
+          }
         }
       }
     }
@@ -210,6 +231,7 @@ function parseAssignments(
     }
     result.set(id, {
       id,
+      revision,
       config: validation.config,
     });
   }
@@ -233,8 +255,12 @@ function assignmentConfig(assignment: Record<string, unknown>): RawConfig | null
     tests: assignment.tests.map((test) => {
       const raw: RawTest = { id: isRecord(test) ? text(test.id) : '' };
       if (!isRecord(test)) return raw;
-      if (test.arguments !== undefined) raw.arguments = text(test.arguments);
-      if (test.expectedReturn !== undefined) raw.expectedReturn = text(test.expectedReturn);
+      if (test.argumentsJson !== undefined || test.arguments !== undefined) {
+        raw.arguments = text(test.argumentsJson === undefined ? test.arguments : test.argumentsJson);
+      }
+      if (test.expectedReturnJson !== undefined || test.expectedReturn !== undefined) {
+        raw.expectedReturn = text(test.expectedReturnJson === undefined ? test.expectedReturn : test.expectedReturnJson);
+      }
       if (test.stdin !== undefined) raw.stdin = text(test.stdin);
       if (test.expectedStdout !== undefined) raw.expectedStdout = text(test.expectedStdout);
       return raw;
@@ -268,13 +294,19 @@ interface SourceFile {
   bytes: Uint8Array;
 }
 
-function sourceFiles(value: unknown, errors: PackageErrors): Map<string, SourceFile> {
+function sourceFiles(
+  value: unknown,
+  uploaded: DatasetPackageFiles['sources'],
+  errors: PackageErrors,
+): Map<string, SourceFile> {
   const result = new Map<string, SourceFile>();
-  if (!isRecord(value)) {
+  if (uploaded === undefined && !isRecord(value)) {
     errors.add('submissions', 'Provide the Python sources keyed by package path.');
     return result;
   }
-  const entries = Object.entries(value);
+  const entries = uploaded === undefined
+    ? Object.entries(value as Record<string, unknown>)
+    : [...uploaded.entries()];
   if (entries.length > MAX_DATASET_SOURCES) {
     errors.add('submissions', `Use at most ${MAX_DATASET_SOURCES} source files.`);
   }
@@ -285,23 +317,19 @@ function sourceFiles(value: unknown, errors: PackageErrors): Map<string, SourceF
       errors.add(key, 'Use a relative .py path.');
       continue;
     }
-    const source = record(entry, key, errors);
+    const source = entry instanceof Uint8Array ? { bytes: entry } : embeddedSource(entry, key, errors);
     if (source === null) continue;
-    let bytes: Uint8Array;
-    try {
-      bytes = source.encoding === 'base64'
-        ? base64Bytes(text(source.text))
-        : new TextEncoder().encode(text(source.text));
-    } catch {
-      errors.add(key, 'The source is not valid base64.');
-      continue;
-    }
+    const { bytes } = source;
     total += bytes.byteLength;
     if (bytes.byteLength > MAX_SOURCE_BYTES) {
       errors.add(key, `Keep each source at most ${MAX_SOURCE_BYTES / 1024} KiB.`);
     }
     try {
       const decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+      if ('text' in source && decoded !== source.text) {
+        errors.add(key, 'The source must round-trip as UTF-8.');
+        continue;
+      }
       result.set(path, { text: decoded, bytes });
     } catch {
       errors.add(key, 'The source must be valid UTF-8.');
@@ -311,6 +339,26 @@ function sourceFiles(value: unknown, errors: PackageErrors): Map<string, SourceF
     errors.add('submissions', `Keep all sources under ${MAX_DATASET_SOURCE_BYTES / 1024 / 1024} MiB.`);
   }
   return result;
+}
+
+function embeddedSource(entry: unknown, key: string, errors: PackageErrors):
+  { bytes: Uint8Array; text?: string } | null {
+  const source = record(entry, key, errors);
+  if (source === null) return null;
+  if (typeof source.text !== 'string'
+    || (source.encoding !== undefined && source.encoding !== 'base64')) {
+    errors.add(key, 'Supply a UTF-8 source string or a base64-encoded source string.');
+    return null;
+  }
+  if (source.encoding === undefined) {
+    return { bytes: new TextEncoder().encode(source.text), text: source.text };
+  }
+  try {
+    return { bytes: base64Bytes(source.text) };
+  } catch {
+    errors.add(key, 'The source is not valid base64.');
+    return null;
+  }
 }
 
 function parseCases(
@@ -331,6 +379,8 @@ function parseCases(
   const caseIds = new Set<string>();
   const familySplits = new Map<string, DatasetSplit>();
   const pathSplits = new Map<string, DatasetSplit>();
+  const sourceSplits = new Map<string, DatasetSplit>();
+  const assignmentFamilies = new Map<string, string>();
 
   for (const [index, raw] of value.entries()) {
     const datasetCase = record(raw, `cases.${index}`, errors);
@@ -370,12 +420,23 @@ function parseCases(
       errors.add(`${key}.assignmentId`, 'Reference a declared assignment.');
       continue;
     }
+    const previousFamily = assignmentFamilies.get(assignmentId);
+    if (previousFamily !== undefined && previousFamily !== familyId) {
+      errors.add(`${key}.family`, 'All cases using an assignment must use the same family.');
+    }
+    assignmentFamilies.set(assignmentId, familyId);
 
     const submissions = parseSubmissions(datasetCase.submissions, key, sources, pathSplits, split, errors);
     if (submissions.length === 0) continue;
-    const revisions = new Set(submissions.map((submission) => submission.assignmentRevision));
-    if (revisions.size !== 1) {
-      errors.add(`${key}.assignmentRevision`, 'Both versions of a pair must use the same assignment revision.');
+    if (submissions.some((submission) => submission.assignmentRevision !== assignment.revision)) {
+      errors.add(`${key}.assignmentRevision`, 'Each submission must use the declared assignment revision.');
+    }
+    for (const submission of submissions) {
+      const previousSplit = sourceSplits.get(submission.source);
+      if (previousSplit !== undefined && previousSplit !== split) {
+        errors.add(`${key}.split`, 'Identical source cannot appear in both splits, even under different paths.');
+      }
+      sourceSplits.set(submission.source, split);
     }
 
     cases.push({
@@ -430,13 +491,15 @@ function parseSubmissions(
     const previousSplit = pathSplits.get(path);
     if (previousSplit !== undefined && previousSplit !== split) {
       errors.add(`${caseKey}.split`, 'A submission file cannot appear in both splits.');
+    } else if (previousSplit !== undefined) {
+      errors.add(`${caseKey}.submissions.${index}.path`, 'A source file can be referenced only once.');
     } else {
       pathSplits.set(path, split);
     }
     submissions.push({
       version: version as ParsedSubmission['version'],
       path,
-      assignmentRevision: text(entry.assignmentRevision) || '1',
+      assignmentRevision: entry.assignmentRevision === undefined ? '1' : text(entry.assignmentRevision),
       source: source.text,
       sourceBytes: source.bytes,
       key: { clean: false, errors: [] },
@@ -447,8 +510,8 @@ function parseSubmissions(
     if (!present.has('original') || !present.has('corrected')) {
       errors.add(`${caseKey}.submissions`, 'A pair needs one original and one corrected submission.');
     }
-    if (submissions.length === 2 && submissions[0]!.path === submissions[1]!.path) {
-      errors.add(`${caseKey}.submissions`, 'A pair needs two different source files.');
+    if (submissions.length === 2 && submissions[0]!.source === submissions[1]!.source) {
+      errors.add(`${caseKey}.submissions`, 'A pair needs a changed source file.');
     }
   }
   return submissions;
@@ -506,30 +569,28 @@ function attachKeys(
       }
       continue;
     }
-    const targeted = stringArray(raw.targetedErrorIds);
-    if (targeted.length === 0) {
-      errors.add(`scoring.${datasetCase.id}.targetedErrorIds`, 'Name the error the correction targets.');
+    const targeted = raw.targetedErrorIds;
+    const target: unknown = Array.isArray(targeted) && targeted.length === 1 ? targeted[0] : null;
+    if (typeof target !== 'string' || !ID_PATTERN.test(target)) {
+      errors.add(`scoring.${datasetCase.id}.targetedErrorIds`, 'Name exactly one error the correction targets.');
       continue;
     }
     const original = datasetCase.submissions.find((submission) => submission.version === 'original');
     const corrected = datasetCase.submissions.find((submission) => submission.version === 'corrected');
-    const originalIds = new Set(original?.key.errors.map((error) => error.id) ?? []);
+    const originalErrors = new Map(original?.key.errors.map((error) => [error.id, error.requirement]));
     const correctedIds = new Set(corrected?.key.errors.map((error) => error.id) ?? []);
-    for (const id of targeted) {
-      if (!originalIds.has(id)) {
-        errors.add(
-          `scoring.${datasetCase.id}.targetedErrorIds`,
-          `"${id}" is not an expected original error.`,
-        );
-      }
-      if (correctedIds.has(id)) {
-        errors.add(
-          `scoring.${datasetCase.id}.corrected.targeted`,
-          `"${id}" must be absent from the corrected submission.`,
-        );
-      }
+    if (!originalErrors.has(target)) {
+      errors.add(`scoring.${datasetCase.id}.targetedErrorIds`, `"${target}" is not an expected original error.`);
     }
-    datasetCase.pair.targetedErrorIds = targeted;
+    if (correctedIds.has(target)) {
+      errors.add(`scoring.${datasetCase.id}.corrected.targeted`, `"${target}" must be absent after the correction.`);
+    }
+    originalErrors.delete(target);
+    if (originalErrors.size !== correctedIds.size
+      || corrected?.key.errors.some((error) => originalErrors.get(error.id) !== error.requirement)) {
+      errors.add(`scoring.${datasetCase.id}.corrected.errors`, 'The correction must preserve the unrelated expected errors.');
+    }
+    datasetCase.pair.targetedErrorIds = [target];
   }
 }
 
@@ -671,45 +732,26 @@ function attachVerification(
   }
 }
 
-export function emptyCoverage(): DatasetCoverage {
+export function coverageForCases(cases: readonly {
+  split: DatasetSplit;
+  format: AssignmentFormat;
+  submissions: readonly Pick<ParsedSubmission, 'version' | 'key'>[];
+}[]): DatasetCoverage {
   const empty = (): CoverageCell => ({ clean: 0, fixed: 0, partial: 0 });
-  return {
+  const coverage: DatasetCoverage = {
     development: { function: empty(), script: empty() },
     held_out: { function: empty(), script: empty() },
   };
-}
-
-export function addCaseCoverage(
-  coverage: DatasetCoverage,
-  stats: {
-    split: DatasetSplit;
-    format: AssignmentFormat;
-    isPair: boolean;
-    singleClean: boolean;
-    correctedClean: boolean;
-  },
-): void {
-  const cell = coverage[stats.split][stats.format];
-  if (!stats.isPair) {
-    if (stats.singleClean) cell.clean += 1;
-  } else if (stats.correctedClean) {
-    cell.fixed += 1;
-  } else {
-    cell.partial += 1;
-  }
-}
-
-export function coverageForCases(cases: ParsedDatasetCase[]): DatasetCoverage {
-  const coverage = emptyCoverage();
   for (const datasetCase of cases) {
+    const cell = coverage[datasetCase.split][datasetCase.format];
     const corrected = datasetCase.submissions.find((submission) => submission.version === 'corrected');
-    addCaseCoverage(coverage, {
-      split: datasetCase.split,
-      format: datasetCase.format,
-      isPair: datasetCase.pair !== null,
-      singleClean: datasetCase.submissions[0]?.key.clean === true,
-      correctedClean: corrected?.key.clean === true,
-    });
+    if (corrected === undefined) {
+      if (datasetCase.submissions[0]?.key.clean) cell.clean += 1;
+    } else if (corrected.key.clean) {
+      cell.fixed += 1;
+    } else {
+      cell.partial += 1;
+    }
   }
   return coverage;
 }
@@ -730,10 +772,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value : '';
-}
-
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
 function base64Bytes(value: string): Uint8Array {

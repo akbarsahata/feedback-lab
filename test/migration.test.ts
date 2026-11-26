@@ -9,6 +9,7 @@ const NOW = '2026-11-25T00:00:00.000Z';
 
 async function resetToLegacySchema(): Promise<void> {
   await env.DB.batch([
+    env.DB.prepare('DROP TABLE IF EXISTS dataset_protocol_locks'),
     env.DB.prepare('DROP TABLE IF EXISTS dataset_attempts'),
     env.DB.prepare('DROP TABLE IF EXISTS dataset_signoffs'),
     env.DB.prepare('DROP TABLE IF EXISTS dataset_submissions'),

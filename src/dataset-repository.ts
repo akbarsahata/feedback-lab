@@ -4,8 +4,7 @@ import {
   getVersion,
 } from './repository';
 import {
-  addCaseCoverage,
-  emptyCoverage,
+  coverageForCases,
   type AuthoringCheck,
   type DatasetCoverage,
   type DatasetPackageFiles,
@@ -13,7 +12,7 @@ import {
   type ParsedDatasetPackage,
   type ScoringEntry,
 } from './dataset-package';
-import { submissionRunStatements } from './runs';
+import { EXECUTION_TEST_STATUSES, submissionRunStatements, type ExecutionTestStatus } from './runs';
 import { sha256Hex } from './upload';
 
 export class DatasetNotFoundError extends Error {
@@ -72,6 +71,7 @@ interface CaseRow {
   split: DatasetSplit;
   assignment_id: string;
   assignment_version_id: string;
+  package_assignment_revision: string | null;
   format: AssignmentFormat;
   pair_targeted_json: string | null;
   authoring_checks_json: string;
@@ -140,6 +140,7 @@ export interface DatasetCaseDetail {
   format: AssignmentFormat;
   assignmentId: string;
   assignmentVersionId: string;
+  packageAssignmentRevision: string | null;
   assignment: {
     title: string;
     description: string;
@@ -178,6 +179,7 @@ export interface DatasetRevisionDetail {
   releasedAt: string | null;
   releasedBy: { id: string; email: string } | null;
   studyProtocolRef: string | null;
+  lockedProtocolRef: string | null;
   cases: DatasetCaseDetail[];
   coverage: DatasetCoverage;
 }
@@ -191,8 +193,15 @@ export interface DatasetLibraryEntry {
   updatedAt: string;
 }
 
-export function datasetPackageDigest(files: DatasetPackageFiles): Promise<string> {
-  return sha256Hex(new TextEncoder().encode(canonicalJson(files)));
+export async function datasetPackageDigest(files: DatasetPackageFiles): Promise<string> {
+  const { sources, ...documents } = files;
+  const contents = sources === undefined ? documents : {
+    ...documents,
+    sources: Object.fromEntries(await Promise.all(
+      [...sources].map(async ([path, bytes]) => [path, await sha256Hex(bytes)]),
+    )),
+  };
+  return sha256Hex(new TextEncoder().encode(canonicalJson(contents)));
 }
 
 function canonicalJson(value: unknown): string {
@@ -262,8 +271,9 @@ export async function importDatasetPackage(
         .prepare(
           `INSERT INTO dataset_cases
              (id, revision_id, case_key, family_id, split, assignment_id,
-              assignment_version_id, format, pair_targeted_json, authoring_checks_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               assignment_version_id, format, pair_targeted_json, authoring_checks_json,
+               package_assignment_id, package_assignment_revision)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           caseId,
@@ -276,6 +286,8 @@ export async function importDatasetPackage(
           datasetCase.format,
           datasetCase.pair === null ? null : JSON.stringify(datasetCase.pair.targetedErrorIds),
           JSON.stringify(datasetCase.authoringChecks),
+          datasetCase.assignmentId,
+          datasetCase.assignmentRevision,
         ),
     );
     for (const submission of datasetCase.submissions) {
@@ -396,11 +408,13 @@ export async function getDatasetRevision(
   const revision = await db
     .prepare(
       `SELECT r.*, importer.email AS imported_by_email,
-              freezer.email AS frozen_by_email, releaser.email AS released_by_email
+              freezer.email AS frozen_by_email, releaser.email AS released_by_email,
+              lock.protocol_ref AS locked_protocol_ref
        FROM dataset_revisions r
        JOIN users importer ON importer.id = r.imported_by
        LEFT JOIN users freezer ON freezer.id = r.frozen_by
        LEFT JOIN users releaser ON releaser.id = r.released_by
+       LEFT JOIN dataset_protocol_locks lock ON lock.revision_id = r.id
        WHERE r.id = ?`,
     )
     .bind(revisionId)
@@ -408,6 +422,7 @@ export async function getDatasetRevision(
       imported_by_email: string;
       frozen_by_email: string | null;
       released_by_email: string | null;
+      locked_protocol_ref: string | null;
     }>();
   if (revision === null) throw new DatasetNotFoundError();
 
@@ -439,9 +454,11 @@ export async function getDatasetRevision(
                JOIN tests t ON t.test_suite_version_id = r.test_suite_version_id
                  AND t.test_id = tr.test_id
                WHERE tr.run_id = r.id
-                 AND tr.status NOT IN ('pending', 'running', 'infrastructure_failure', 'not_run'))
+                 AND tr.status IN (${EXECUTION_TEST_STATUSES.map(() => '?').join(', ')}))
                 AS resolved_count,
               (SELECT COUNT(*) FROM test_results tr
+               JOIN tests t ON t.test_suite_version_id = r.test_suite_version_id
+                 AND t.test_id = tr.test_id
                WHERE tr.run_id = r.id AND tr.status = 'pass') AS passed_count
        FROM dataset_attempts a
        JOIN test_runs r ON r.id = a.run_id
@@ -450,7 +467,7 @@ export async function getDatasetRevision(
        WHERE c.revision_id = ?
        ORDER BY a.attempt_number`,
     )
-    .bind(revisionId)
+    .bind(...EXECUTION_TEST_STATUSES, revisionId)
     .all<AttemptRow>();
   const { results: signoffs } = await db
     .prepare(
@@ -499,6 +516,7 @@ export async function getDatasetRevision(
       format: row.format,
       assignmentId: row.assignment_id,
       assignmentVersionId: row.assignment_version_id,
+      packageAssignmentRevision: row.package_assignment_revision,
       assignment: {
         title: version.title,
         description: version.description,
@@ -552,25 +570,10 @@ export async function getDatasetRevision(
       ? null
       : { id: revision.released_by, email: revision.released_by_email ?? '' },
     studyProtocolRef: revision.study_protocol_ref,
+    lockedProtocolRef: revision.locked_protocol_ref,
     cases,
-    coverage: coverageFor(cases),
+    coverage: coverageForCases(cases),
   };
-}
-
-function coverageFor(cases: DatasetCaseDetail[]): DatasetCoverage {
-  const coverage = emptyCoverage();
-  for (const datasetCase of cases) {
-    const single = datasetCase.submissions.find((submission) => submission.version === 'single');
-    const corrected = datasetCase.submissions.find((submission) => submission.version === 'corrected');
-    addCaseCoverage(coverage, {
-      split: datasetCase.split,
-      format: datasetCase.format,
-      isPair: datasetCase.pairTargetedErrorIds !== null,
-      singleClean: single?.key.clean === true,
-      correctedClean: corrected?.key.clean === true,
-    });
-  }
-  return coverage;
 }
 
 export async function recordDatasetSignoff(
@@ -597,11 +600,14 @@ export async function recordDatasetSignoff(
   if (datasetCase === undefined) throw new DatasetNotFoundError();
   const fingerprint = await caseFingerprint(datasetCase);
 
-  await db
+  const result = await db
     .prepare(
       `INSERT INTO dataset_signoffs
          (id, case_id, user_id, signed_at, case_fingerprint, evidence_note)
-       VALUES (?, ?, ?, ?, ?, ?)
+       SELECT ?, c.id, ?, ?, ?, ?
+       FROM dataset_cases c
+       JOIN dataset_revisions r ON r.id = c.revision_id
+       WHERE c.id = ? AND r.status = 'draft'
        ON CONFLICT(case_id) DO UPDATE SET
          user_id = excluded.user_id,
          signed_at = excluded.signed_at,
@@ -610,13 +616,16 @@ export async function recordDatasetSignoff(
     )
     .bind(
       crypto.randomUUID(),
-      datasetCase.id,
       userId,
       now,
       fingerprint,
       evidenceNote.trim(),
+      datasetCase.id,
     )
     .run();
+  if (result.meta.changes === 0) {
+    throw new DatasetStateError('A frozen revision cannot receive new sign-offs.');
+  }
 }
 
 async function caseFingerprint(datasetCase: DatasetCaseDetail): Promise<string> {
@@ -654,9 +663,7 @@ export async function launchDatasetRun(
   const runId = crypto.randomUUID();
   const attemptId = crypto.randomUUID();
 
-  let results: D1Result[];
-  try {
-    results = await db.batch([
+  const results = await db.batch([
     db
       .prepare(
         `INSERT INTO submission_versions
@@ -667,13 +674,13 @@ export async function launchDatasetRun(
          FROM dataset_submissions s
          JOIN dataset_cases c ON c.id = s.case_id
          JOIN dataset_revisions r ON r.id = c.revision_id
-         JOIN assignment_versions v ON v.id = c.assignment_version_id
+         JOIN assignment_versions v ON v.id = c.assignment_version_id AND v.assignment_id = c.assignment_id
          WHERE s.id = ? AND r.id = ? AND r.status = 'draft'
            AND NOT EXISTS (
              SELECT 1 FROM dataset_attempts a
              JOIN test_runs tr ON tr.id = a.run_id
              WHERE a.dataset_submission_id = s.id
-               AND tr.status IN ('queued', 'running')
+               AND tr.status IN ('queued', 'running', 'complete')
            )`,
       )
       .bind(submissionRecordId, userId, now, datasetSubmissionId, revisionId),
@@ -688,28 +695,19 @@ export async function launchDatasetRun(
       .prepare(
         `INSERT INTO dataset_attempts
            (id, dataset_submission_id, submission_id, run_id, attempt_number, created_by, created_at)
-         SELECT ?, s.id, ?, ?, (SELECT COALESCE(MAX(attempt_number), 0) + 1
+         SELECT ?, s.id, tr.submission_id, tr.id, (SELECT COALESCE(MAX(attempt_number), 0) + 1
                                   FROM dataset_attempts WHERE dataset_submission_id = s.id),
                 ?, ?
          FROM dataset_submissions s
-         JOIN dataset_cases c ON c.id = s.case_id
-         JOIN dataset_revisions r ON r.id = c.revision_id
-         WHERE s.id = ? AND r.id = ? AND r.status = 'draft'`,
-      )
-      .bind(attemptId, submissionRecordId, runId, userId, now, datasetSubmissionId, revisionId),
-    ]);
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
-      throw new DatasetStateError(
-        'Another study run started for this submission. Wait for it to finish before retrying.',
-      );
-    }
-    throw error;
-  }
+         JOIN test_runs tr ON tr.id = ?
+         WHERE s.id = ?`,
+       )
+      .bind(attemptId, userId, now, runId, datasetSubmissionId),
+  ]);
 
   if ((results[0]?.meta.changes ?? 0) === 0) {
     throw new DatasetStateError(
-      'This submission cannot start a study run right now. Check that the revision is a draft and no attempt is still running.',
+      'Only a submission in a draft with no active or completed study run can be launched.',
     );
   }
   return { attemptId, runId, submissionId: submissionRecordId };
@@ -728,28 +726,40 @@ export async function freezeDataset(
   const issues = await freezeIssues(detail);
   if (issues.length > 0) throw new DatasetFreezeError(issues);
 
-  const statements: D1PreparedStatement[] = [
-    db
-      .prepare(
-        `UPDATE dataset_revisions
-         SET status = 'frozen', frozen_by = ?, frozen_at = ?
-         WHERE id = ? AND status = 'draft'`,
-      )
-      .bind(userId, now, revisionId),
-  ];
+  // Package inputs are immutable and a completed run cannot be replaced.
+  // Every pin and the publish step check the draft state in the same batch.
+  const statements: D1PreparedStatement[] = [];
   for (const datasetCase of detail.cases) {
     for (const submission of datasetCase.submissions) {
       const usable = usableAttempt(submission);
       if (usable === null) continue;
       statements.push(
         db
-          .prepare('UPDATE dataset_submissions SET frozen_run_id = ? WHERE id = ?')
-          .bind(usable.runId, submission.id),
+          .prepare(
+            `UPDATE dataset_submissions SET frozen_run_id = ?
+             WHERE id = ? AND EXISTS (
+               SELECT 1 FROM dataset_revisions WHERE id = ? AND status = 'draft'
+             )`,
+          )
+          .bind(usable.runId, submission.id, revisionId),
       );
     }
   }
-  const results = await db.batch(statements);
-  if ((results[0]?.meta.changes ?? 0) === 0) {
+  statements.push(db.prepare(
+    `UPDATE dataset_revisions
+     SET status = 'frozen', frozen_by = ?, frozen_at = ?
+     WHERE id = ? AND status = 'draft'`,
+  ).bind(userId, now, revisionId));
+  let results;
+  try {
+    results = await db.batch(statements);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('dataset_split_conflict')) {
+      throw new DatasetFreezeError(['A family or source in this draft belongs to the other split in an earlier freeze.']);
+    }
+    throw error;
+  }
+  if (results.at(-1)?.meta.changes === 0) {
     throw new DatasetStateError('The revision changed before it was frozen.');
   }
   return getDatasetRevision(db, revisionId);
@@ -812,7 +822,8 @@ async function freezeIssues(detail: DatasetRevisionDetail): Promise<string[]> {
       if (submission.key.clean && usable.passedCount !== usable.testCount) {
         issues.push(`${label}: a clean submission must pass every supplied study test.`);
       }
-      if (!submission.key.clean && usable.passedCount === usable.testCount) {
+      if (usable.passedCount === usable.testCount
+        && submission.key.errors.some((error) => error.evidence.some((item) => item.kind === 'source'))) {
         allTestsPassBuggyCells.add(`${datasetCase.split}/${datasetCase.format}`);
       }
     }
@@ -822,7 +833,7 @@ async function freezeIssues(detail: DatasetRevisionDetail): Promise<string[]> {
     for (const format of ['function', 'script'] as AssignmentFormat[]) {
       if (!allTestsPassBuggyCells.has(`${split}/${format}`)) {
         issues.push(
-          `${split}/${format}: include a buggy submission that passes every supplied study test.`,
+          `${split}/${format}: include a source-evident error in a submission that passes every supplied study test.`,
         );
       }
     }
@@ -844,12 +855,16 @@ export async function releaseDataset(
     .prepare(
       `UPDATE dataset_revisions
        SET released_by = ?, released_at = ?, study_protocol_ref = ?
-       WHERE id = ? AND status = 'frozen' AND released_at IS NULL`,
+       WHERE id = ? AND status = 'frozen' AND released_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM dataset_protocol_locks
+           WHERE revision_id = dataset_revisions.id AND protocol_ref = ?
+         )`,
     )
-    .bind(userId, now, studyProtocolRef.trim(), revisionId)
+    .bind(userId, now, studyProtocolRef.trim(), revisionId, studyProtocolRef.trim())
     .run();
   if ((result.meta.changes ?? 0) === 0) {
-    throw new DatasetStateError('Only a frozen, unreleased revision can be released.');
+    throw new DatasetStateError('Release requires a frozen, unreleased revision and its locked study protocol.');
   }
 }
 
@@ -860,13 +875,18 @@ async function studySplit(
 ): Promise<DatasetSplit> {
   const revision = await db
     .prepare(
-      `SELECT status, released_at FROM dataset_revisions WHERE id = ?`,
+      `SELECT r.status, (r.released_at IS NOT NULL AND EXISTS (
+         SELECT 1 FROM dataset_protocol_locks l
+         WHERE l.revision_id = r.id AND l.protocol_ref = r.study_protocol_ref
+       )) AS has_valid_release
+       FROM dataset_revisions r WHERE r.id = ?`,
     )
     .bind(revisionId)
-    .first<{ status: 'draft' | 'frozen'; released_at: string | null }>();
+    .first<{ status: 'draft' | 'frozen'; has_valid_release: number }>();
   if (revision === null || revision.status !== 'frozen') throw new DatasetNotFoundError();
-  if (use === 'main' && revision.released_at === null) throw new DatasetNotFoundError();
-  return use === 'pilot' ? 'development' : 'held_out';
+  if (use === 'pilot') return 'development';
+  if (use === 'main' && revision.has_valid_release === 1) return 'held_out';
+  throw new DatasetNotFoundError();
 }
 
 export interface StudyCaseSummary {
@@ -921,7 +941,7 @@ export interface StudyEvidence {
       expectedReturnJson: string | null;
       stdin: string | null;
       expectedStdout: string | null;
-      status: string;
+      status: ExecutionTestStatus;
       actualJson: string | null;
       stdout: string | null;
       stderr: string;
@@ -978,7 +998,7 @@ export async function getStudyEvidence(
       expected_return_json: string | null;
       stdin: string | null;
       expected_stdout: string | null;
-      status: string;
+      status: ExecutionTestStatus;
       actual_json: string | null;
       stdout: string | null;
       stderr: string | null;
@@ -1018,6 +1038,7 @@ export interface ScoringRead {
   caseKey: string;
   targetedErrorIds: string[] | null;
   submissions: {
+    submissionId: string;
     version: 'single' | 'original' | 'corrected';
     key: ScoringEntry;
   }[];
@@ -1032,7 +1053,7 @@ export async function getScoringRead(
   const split = await studySplit(db, revisionId, use);
   const { results } = await db
     .prepare(
-      `SELECT c.case_key, c.split, c.pair_targeted_json, s.version, s.scoring_json
+      `SELECT c.case_key, c.split, c.pair_targeted_json, s.id, s.version, s.scoring_json
        FROM dataset_cases c
        JOIN dataset_submissions s ON s.case_id = c.id
        WHERE c.revision_id = ? AND c.case_key = ?
@@ -1043,6 +1064,7 @@ export async function getScoringRead(
       case_key: string;
       split: DatasetSplit;
       pair_targeted_json: string | null;
+      id: string;
       version: 'single' | 'original' | 'corrected';
       scoring_json: string;
     }>();
@@ -1054,6 +1076,7 @@ export async function getScoringRead(
       ? null
       : JSON.parse(results[0]!.pair_targeted_json) as string[],
     submissions: results.map((row) => ({
+      submissionId: row.id,
       version: row.version,
       key: JSON.parse(row.scoring_json) as ScoringEntry,
     })),

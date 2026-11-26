@@ -181,6 +181,7 @@ export async function postMultipart(
 
 export async function clearDatabase(): Promise<void> {
   await env.DB.batch([
+    env.DB.prepare('DELETE FROM dataset_protocol_locks'),
     env.DB.prepare('DELETE FROM dataset_attempts'),
     env.DB.prepare('DELETE FROM dataset_signoffs'),
     env.DB.prepare('DELETE FROM dataset_submissions'),

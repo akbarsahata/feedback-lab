@@ -6,6 +6,14 @@ import type { Runner, RunnerJob } from '../src/runner';
 
 export const DATASET_NOW = '2026-11-27T09:00:00.000Z';
 const EVIDENCE_NOTE = 'Checked the rubric, source range, and study tests.';
+export const STUDY_PROTOCOL = 'study-protocol/2026-11-30';
+
+export async function recordProtocolLock(revisionId: string, userId: string): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO dataset_protocol_locks (revision_id, protocol_ref, locked_by, locked_at)
+     VALUES (?, ?, ?, ?)`,
+  ).bind(revisionId, STUDY_PROTOCOL, userId, DATASET_NOW).run();
+}
 
 function tagged(value: unknown): unknown {
   if (value === null) return { kind: 'none' };

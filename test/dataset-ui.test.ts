@@ -1,7 +1,6 @@
 import { env, SELF } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { freezeDataset, getDatasetRevision } from '../src/dataset-repository';
-import { parseDatasetPackage } from '../src/dataset-package';
+import { getDatasetRevision } from '../src/dataset-repository';
 import {
   apiJson,
   countRows,
@@ -13,9 +12,10 @@ import {
 } from './helpers';
 import { validPackageBundle, type PackageBundle } from './dataset-fixtures';
 import {
-  DATASET_NOW as NOW,
+  recordProtocolLock,
   runEverySubmission,
   signEveryCase,
+  STUDY_PROTOCOL,
 } from './dataset-helpers';
 
 const BASE_URL = 'https://feedback-lab.test';
@@ -45,14 +45,6 @@ async function importViaUi(session: SignedIn, bundle: PackageBundle): Promise<st
   return match![1]!;
 }
 
-async function prepareFrozen(session: SignedIn, bundle: PackageBundle): Promise<string> {
-  const revisionId = await importViaUi(session, bundle);
-  await signEveryCase(revisionId, session.user.id);
-  await runEverySubmission(revisionId, session.user.id);
-  await freezeDataset(env.DB, revisionId, session.user.id, NOW);
-  return revisionId;
-}
-
 describe('dataset pages and study API', () => {
   it('imports a package through the researcher UI and shows the verification workspace', async () => {
     const researcher = await signIn(await seedUser());
@@ -62,7 +54,25 @@ describe('dataset pages and study API', () => {
     expect(library.status).toBe(200);
     expect(await library.text()).toContain('Import a package');
 
-    const revisionId = await importViaUi(researcher, validPackageBundle());
+    const bundle = validPackageBundle();
+    const sources = bundle.manifest.submissions;
+    delete bundle.manifest.submissions;
+    const form = importForm(researcher, bundle);
+    for (const datasetCase of bundle.manifest.cases) {
+      for (const submission of datasetCase.submissions) {
+        const path = `${datasetCase.id}-${submission.version}.py`;
+        form.append('sources', new File([sources[submission.path].text], path));
+        for (const error of bundle.scoring.cases[datasetCase.id].submissions[submission.version].errors) {
+          for (const evidence of error.evidence) if (evidence.kind === 'source') evidence.path = path;
+        }
+        submission.path = path;
+      }
+    }
+    form.set('manifest', new File([JSON.stringify(bundle.manifest)], 'manifest.json'));
+    form.set('scoring', new File([JSON.stringify(bundle.scoring)], 'scoring-key.json'));
+    const imported = await postMultipart('/datasets/import', form, researcher);
+    expect(imported.status, await imported.text()).toBe(303);
+    const revisionId = imported.headers.get('location')?.split(/[/?]/)[2];
     expect(await countRows('datasets')).toBe(1);
     expect(await countRows('dataset_cases')).toBe(12);
 
@@ -76,6 +86,8 @@ describe('dataset pages and study API', () => {
     expect(html).toContain('Sign off case');
     expect(html).toContain('Record study run');
     expect(html).toContain('Freeze revision');
+    expect(html).toContain('Source lines 1–2');
+    expect(html).toContain('The supplied study suite distinguishes');
   });
 
   it('rejects malformed packages with case-level errors and creates nothing', async () => {
@@ -170,15 +182,21 @@ describe('dataset pages and study API', () => {
     );
     expect(response.status).toBe(303);
     expect(response.headers.get('location')).toMatch(/^\/runs\/[0-9a-f-]{36}$/);
+    const duplicate = await postForm(
+      `/datasets/${revisionId}/runs`, { submissionId: submission.id }, researcher,
+    );
+    expect(duplicate.status).toBe(409);
     expect(await countRows('dataset_attempts')).toBe(1);
   });
 
   it('freezes through the UI, releases held-out cases, and keeps study reads separated', async () => {
     const researcher = await signIn(await seedUser());
-    const revisionId = await prepareFrozen(researcher, validPackageBundle());
+    const revisionId = await importViaUi(researcher, validPackageBundle());
+    await signEveryCase(revisionId, researcher.user.id);
+    await runEverySubmission(revisionId, researcher.user.id);
 
     const frozen = await postForm(`/datasets/${revisionId}/freeze`, {}, researcher);
-    expect(frozen.status).toBe(409);
+    expect(frozen.status).toBe(303);
 
     const before = await apiJson(`/api/datasets/${revisionId}/study/cases?use=main`, {
       session: researcher,
@@ -198,11 +216,12 @@ describe('dataset pages and study API', () => {
       'dev-io-partial',
     ]);
 
-    const release = await postForm(
-      `/datasets/${revisionId}/release`,
-      { studyProtocolRef: 'study-protocol/2026-11-30' },
-      researcher,
-    );
+    const releaseHeldOut = (studyProtocolRef: string) =>
+      postForm(`/datasets/${revisionId}/release`, { studyProtocolRef }, researcher);
+    expect((await releaseHeldOut(STUDY_PROTOCOL)).status).toBe(409);
+    await recordProtocolLock(revisionId, researcher.user.id);
+    expect((await releaseHeldOut('other-study')).status).toBe(409);
+    const release = await releaseHeldOut(STUDY_PROTOCOL);
     expect(release.status).toBe(303);
 
     const main = await apiJson(`/api/datasets/${revisionId}/study/cases?use=main`, {
