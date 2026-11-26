@@ -296,13 +296,14 @@ async function reviseAssignmentForm(
   const baseVersionId = parsed.baseVersionId.trim() || undefined;
   const validation = validateConfig(parsed.raw);
   if (!validation.ok || baseVersionId === undefined) {
-    await getActiveVersion(env.DB, assignmentId); // Preserve 404 for an unknown assignment.
+    const active = await getActiveVersion(env.DB, assignmentId);
     return htmlResponse(
       assignmentFormPage({
         user: session,
         mode: 'edit',
         assignmentId,
         baseVersionId,
+        initialFormat: active.format,
         raw: parsed.raw,
         errors: validation.ok ? undefined : validation.errors,
       }),
@@ -323,12 +324,14 @@ async function reviseAssignmentForm(
       : redirect(`/assignments/${assignmentId}?notice=unchanged`);
   } catch (error) {
     if (error instanceof StaleVersionError) {
+      const active = await getActiveVersion(env.DB, assignmentId);
       return htmlResponse(
         assignmentFormPage({
           user: session,
           mode: 'edit',
           assignmentId,
           baseVersionId,
+          initialFormat: active.format,
           raw: parsed.raw,
           conflict: true,
         }),
@@ -365,13 +368,20 @@ function rawFromVersion(version: AssignmentVersionDetail): RawConfig {
   return {
     title: version.title,
     description: version.description,
-    entryPoint: version.entryPoint,
+    format: version.format,
+    entryPoint: version.format === 'function' ? version.entryPoint : '',
     criteria: version.criteria,
-    tests: version.tests.map((test) => ({
-      id: test.id,
-      arguments: formatJsonForDisplay(parseJsonValue(test.argumentsJson)),
-      expectedReturn: formatJsonForDisplay(parseJsonValue(test.expectedReturnJson)),
-    })),
+    tests: version.format === 'function'
+      ? version.tests.map((test) => ({
+          id: test.id,
+          arguments: formatJsonForDisplay(parseJsonValue(test.argumentsJson)),
+          expectedReturn: formatJsonForDisplay(parseJsonValue(test.expectedReturnJson)),
+        }))
+      : version.tests.map((test) => ({
+          id: test.id,
+          stdin: test.stdin,
+          expectedStdout: test.expectedStdout,
+        })),
   };
 }
 
@@ -379,6 +389,7 @@ function emptyConfig(): RawConfig {
   return {
     title: '',
     description: '',
+    format: 'function',
     entryPoint: '',
     criteria: [],
     tests: [],

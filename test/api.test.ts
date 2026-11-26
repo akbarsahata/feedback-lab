@@ -9,6 +9,7 @@ import {
 } from './helpers';
 import {
   assignmentConfig,
+  scriptConfig,
   versionToRawConfig,
   type SerializedVersion,
 } from './fixtures';
@@ -183,8 +184,8 @@ describe('create and reopen a function assignment', () => {
     const wire = await exact.text();
     const args = '[1.0,-0.0,100000000000000000000.0,9007199254740992,1000000000000000128]';
     const expected = '{"10":[2,1],"2":3,"x":5.0}';
-    expect(wire).toContain(`"arguments":${args}`);
-    expect(wire).toContain(`"expectedReturn":${expected}`);
+    expect(wire).not.toContain('"arguments":');
+    expect(wire).not.toContain('"expectedReturn":');
     const reopened = JSON.parse(wire).version as SerializedVersion;
     expect(reopened.testSuite.tests[0]?.argumentsJson).toBe(args);
     expect(reopened.testSuite.tests[0]?.expectedReturnJson).toBe(expected);
@@ -211,7 +212,14 @@ describe('create and reopen a function assignment', () => {
 
     const fromRead = await postJson(collection, {
       baseVersionId: second.id,
-      config: { ...config, tests: reopened.testSuite.tests },
+      config: {
+        ...config,
+        tests: reopened.testSuite.tests.map((test) => ({
+          ...test,
+          arguments: [999],
+          expectedReturn: 999,
+        })),
+      },
     }, researcher);
     expect(fromRead.response.status).toBe(200);
     expect(fromRead.body.changed).toBe(false);
@@ -241,16 +249,14 @@ describe('create and reopen a function assignment', () => {
     ]);
 
     const first = version.testSuite.tests[0]!;
-    expect(first.arguments).toEqual([[4, -1]]);
-    expect(Array.isArray(first.arguments)).toBe(true);
+    expect(first).not.toHaveProperty('arguments');
+    expect(first).not.toHaveProperty('expectedReturn');
     expect(first.argumentsJson).toBe('[[4,-1]]');
-    expect(first.expectedReturn).toBe(4);
     expect(first.expectedReturnJson).toBe('4');
     expect(first.comparisonRule).toBe('function-value-v1');
 
     const second = version.testSuite.tests[1]!;
-    expect(second.arguments).toEqual([[]]);
-    expect(second.expectedReturn).toBeNull();
+    expect(second.argumentsJson).toBe('[[]]');
     expect(second.expectedReturnJson).toBe('null');
   });
 
@@ -279,8 +285,8 @@ describe('create and reopen a function assignment', () => {
     const active = await apiJson(base, { session: researcher });
     expect(active.response.status).toBe(200);
     expect(active.body.version.id).toBe(version.id);
-    expect(active.body.version.testSuite.tests[0].arguments).toEqual([[4, -1]]);
-    expect(active.body.version.testSuite.tests[1].expectedReturn).toBeNull();
+    expect(active.body.version.testSuite.tests[0].argumentsJson).toBe('[[4,-1]]');
+    expect(active.body.version.testSuite.tests[1].expectedReturnJson).toBe('null');
 
     const exact = await apiJson(`${base}/versions/${version.id}`, { session: researcher });
     expect(exact.response.status).toBe(200);
@@ -488,8 +494,8 @@ describe('versioning table', () => {
     expect(original.body.version).toEqual(created.version);
     expect(original.body.version.title).toBe('First positive value');
     expect(original.body.version.rubricVersionId).toBe(created.version.rubricVersionId);
-    expect(original.body.version.testSuite.tests[0].arguments).toEqual([[4, -1]]);
-    expect(original.body.version.testSuite.tests[1].expectedReturn).toBeNull();
+    expect(original.body.version.testSuite.tests[0].argumentsJson).toBe('[[4,-1]]');
+    expect(original.body.version.testSuite.tests[1].expectedReturnJson).toBe('null');
   });
 
   it('allows the same ID in each list and treats a criterion ID rename as a new item', async () => {
@@ -653,6 +659,124 @@ describe('stale saves and races', () => {
     const loser = a.response.status === 409 ? a : b;
     expect(loser.body.error).toBe('stale_version');
     expect(loser.body.currentVersionId).toBe(active.body.version.id);
+  });
+});
+
+describe('script configuration through the JSON API', () => {
+  it('creates a script assignment with exact text and no entry point', async () => {
+    const researcher = await signIn(await seedUser());
+    const stdin = '\r\n  keep  \r\n\r\n';
+    const expectedStdout = '  answer  \r\n\r\n';
+    const { response, body } = await postJson('/api/assignments', {
+      config: scriptConfig({
+        tests: [
+          { id: 'exact', stdin, expectedStdout },
+          { id: 'empty', stdin: '', expectedStdout: '' },
+        ],
+      }),
+    }, researcher);
+
+    expect(response.status).toBe(201);
+    const version = body.version as SerializedVersion;
+    expect(version.format).toBe('script');
+    expect(version.entryPoint).toBeUndefined();
+    expect(version.testSuite.comparisonRule).toBe('script-stdout-v1');
+    expect(version.testSuite.tests[0]).toEqual({
+      id: 'exact',
+      stdin,
+      expectedStdout,
+      comparisonRule: 'script-stdout-v1',
+    });
+    expect(version.testSuite.tests[1]).toEqual({
+      id: 'empty',
+      stdin: '',
+      expectedStdout: '',
+      comparisonRule: 'script-stdout-v1',
+    });
+    expect(version.testSuite.tests[0]).not.toHaveProperty('argumentsJson');
+    expect(version.testSuite.tests[0]).not.toHaveProperty('expectedReturnJson');
+  });
+
+  it('rejects missing script fields, mixed fields, duplicates, and oversized text without writing', async () => {
+    const researcher = await signIn(await seedUser());
+    const missing = await postJson('/api/assignments', {
+      config: scriptConfig({ tests: [{ id: 'missing', stdin: '' }] }),
+    }, researcher);
+    expect(missing.response.status).toBe(400);
+    expect(missing.body.errors.tests.rows['0'].expectedStdout).toMatch(/expected stdout/i);
+    expect(await countRows('assignments')).toBe(0);
+
+    const mixedFunction = await postJson('/api/assignments', {
+      config: assignmentConfig({
+        tests: [{ id: 'mixed', arguments: '[]', expectedReturn: '1', stdin: 'x' }],
+      }),
+    }, researcher);
+    expect(mixedFunction.response.status).toBe(400);
+    expect(mixedFunction.body.errors.tests.rows['0'].stdin).toMatch(/Script assignment/i);
+
+    const mixedScript = await postJson('/api/assignments', {
+      config: scriptConfig({
+        entryPoint: 'main',
+        tests: [{ id: 'mixed', stdin: '', expectedStdout: '', arguments: '[]' }],
+      }),
+    }, researcher);
+    expect(mixedScript.response.status).toBe(400);
+    expect(mixedScript.body.errors.entryPoint).toMatch(/entry point/i);
+    expect(mixedScript.body.errors.tests.rows['0'].arguments).toMatch(/Function assignment/i);
+
+    const duplicate = await postJson('/api/assignments', {
+      config: scriptConfig({
+        tests: [
+          { id: 'same', stdin: '', expectedStdout: '' },
+          { id: 'same', stdin: '', expectedStdout: '' },
+        ],
+      }),
+    }, researcher);
+    expect(duplicate.response.status).toBe(400);
+    expect(duplicate.body.errors.tests.rows['1'].id).toMatch(/already used/i);
+
+    const overLimit = await postJson('/api/assignments', {
+      config: scriptConfig({
+        tests: [{ id: 'large', stdin: 'é'.repeat(8 * 1024 + 1), expectedStdout: '' }],
+      }),
+    }, researcher);
+    expect(overLimit.response.status).toBe(400);
+    expect(overLimit.body.errors.tests.rows['0'].stdin).toMatch(/16 KiB/);
+    expect(await countRows('assignments')).toBe(0);
+  });
+
+  it('treats a format switch as a new version and suite and keeps old function evidence', async () => {
+    const researcher = await signIn(await seedUser());
+    const created = await createAssignment(researcher);
+    const assignmentId = created.version.assignmentId;
+    const switchConfig = scriptConfig({ criteria: created.version.rubric.criteria });
+
+    const switched = await postJson(`/api/assignments/${assignmentId}/versions`, {
+      baseVersionId: created.version.id,
+      config: switchConfig,
+    }, researcher);
+    expect(switched.response.status).toBe(201);
+    expect(switched.body.changed).toBe(true);
+    const scriptVersion = switched.body.version as SerializedVersion;
+    expect(scriptVersion.format).toBe('script');
+    expect(scriptVersion.testSuiteVersionId).not.toBe(created.version.testSuiteVersionId);
+    expect(scriptVersion.rubricVersionId).toBe(created.version.rubricVersionId);
+
+    const unchanged = await postJson(`/api/assignments/${assignmentId}/versions`, {
+      baseVersionId: scriptVersion.id,
+      config: switchConfig,
+    }, researcher);
+    expect(unchanged.response.status).toBe(200);
+    expect(unchanged.body.changed).toBe(false);
+    expect(unchanged.body.version.id).toBe(scriptVersion.id);
+
+    const original = await apiJson(
+      `/api/assignments/${assignmentId}/versions/${created.version.id}`,
+      { session: researcher },
+    );
+    expect(original.body.version.format).toBe('function');
+    expect(original.body.version.entryPoint).toBe('first_positive');
+    expect(original.body.version.testSuite.tests[0].argumentsJson).toBe('[[4,-1]]');
   });
 });
 

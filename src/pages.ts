@@ -1,6 +1,16 @@
 import type { SessionUser } from './auth';
-import { COMPARISON_RULE, MAX_CONFIG_MIB, MAX_ROWS_PER_LIST, type ConfigErrors, type RawConfig } from './config';
-import { repeatableRowsScript } from './editor-script';
+import {
+  COMPARISON_RULE,
+  SCRIPT_COMPARISON_RULE,
+  MAX_CONFIG_MIB,
+  MAX_ROWS_PER_LIST,
+  MAX_SCRIPT_FIELD_BYTES,
+  type AssignmentFormat,
+  type ConfigErrors,
+  type RawConfig,
+  type RawTest,
+} from './config';
+import { formatSwitchScript, repeatableRowsScript } from './editor-script';
 import { escapeHtml, shell } from './html';
 import { MAX_JSON_DEPTH, formatJsonForDisplay, parseJsonValue } from './json';
 import type {
@@ -9,11 +19,11 @@ import type {
   AssignmentVersionSummary,
 } from './repository';
 import { MAX_SOURCE_BYTES, type RunSummary } from './runs';
-import { runStatusClass, runStatusLabel } from './run-format';
+import { formatScript, runStatusClass, runStatusLabel, visibleWhitespace } from './run-format';
 
 export function libraryPage(user: SessionUser, assignments: AssignmentSummary[]): string {
   const body = `<div class="head">
-  <div><h1>Assignments</h1><p class="muted">Choose a Python function assignment to review, edit, or inspect its saved versions.</p></div>
+  <div><h1>Assignments</h1><p class="muted">Choose a Python assignment to review, edit, or inspect its saved versions.</p></div>
   <a class="button primary" href="/assignments/new">Configure assignment</a>
 </div>
 ${assignments.length === 0 ? emptyLibrary() : libraryTable(assignments)}`;
@@ -24,7 +34,7 @@ ${assignments.length === 0 ? emptyLibrary() : libraryTable(assignments)}`;
 function emptyLibrary(): string {
   return `<section class="panel pad">
   <h2>No assignments yet</h2>
-  <p class="muted">The shared library is empty. Configure the first function assignment with a task description, rubric, and tests.</p>
+  <p class="muted">The shared library is empty. Configure the first assignment with a task description, rubric, and tests.</p>
   <p class="end"><a class="button primary" href="/assignments/new">Configure your first assignment</a></p>
 </section>`;
 }
@@ -33,7 +43,7 @@ function libraryTable(assignments: AssignmentSummary[]): string {
   const rows = assignments
     .map(
       (assignment) => `<tr>
-  <td><a href="/assignments/${escapeHtml(assignment.id)}">${escapeHtml(assignment.title)}</a><br><span class="small">Function assignment · active version ${assignment.versionNumber}</span></td>
+  <td><a href="/assignments/${escapeHtml(assignment.id)}">${escapeHtml(assignment.title)}</a><br><span class="small">${formatLabel(assignment.format)} assignment · active version ${assignment.versionNumber}</span></td>
   <td>${plural(assignment.criteriaCount, 'criterion', 'criteria')}</td>
   <td>${plural(assignment.testsCount, 'test')}</td>
   <td class="compact small">${escapeHtml(formatTimestamp(assignment.updatedAt))}</td>
@@ -57,6 +67,7 @@ export interface AssignmentFormPageOptions {
   assignmentId?: string;
   raw: RawConfig;
   baseVersionId?: string;
+  initialFormat?: AssignmentFormat;
   errors?: ConfigErrors;
   conflict?: boolean;
 }
@@ -67,17 +78,20 @@ export function assignmentFormPage({
   assignmentId = '',
   raw,
   baseVersionId,
+  initialFormat = raw.format ?? 'function',
   errors = {},
   conflict,
 }: AssignmentFormPageOptions): string {
   const isEdit = mode === 'edit';
   const missingBase = isEdit && baseVersionId === undefined;
   const formTarget = isEdit ? `/assignments/${assignmentId}` : '/assignments';
+  const format: AssignmentFormat = raw.format ?? 'function';
   const criteria = raw.criteria.length === 0 ? [blankCriterion()] : raw.criteria;
   const tests = raw.tests.length === 0 ? [blankTest()] : raw.tests;
   const hasErrors =
     errors.title !== undefined ||
     errors.description !== undefined ||
+    errors.format !== undefined ||
     errors.entryPoint !== undefined ||
     errors.criteria !== undefined ||
     errors.tests !== undefined ||
@@ -85,7 +99,7 @@ export function assignmentFormPage({
 
   const body = `<div class="head">
   <div>
-    <h1>${isEdit ? 'Edit function assignment' : 'Configure function assignment'}</h1>
+    <h1>${isEdit ? 'Edit assignment' : 'Configure assignment'}</h1>
     <p class="muted">Define the task, the ordered rubric, and the ordered tests. Each save creates immutable versions.</p>
   </div>
   ${missingBase ? '' : `<button class="primary" type="submit" form="assignment-form">${isEdit ? 'Save changes' : 'Save assignment'}</button>`}
@@ -97,7 +111,7 @@ ${missingBase ? `<div class="alert alert-warn" role="alert">
 </div>` : ''}
 ${hasErrors ? '<div class="alert alert-error" role="alert">Fix the highlighted fields and try again. Nothing was saved.</div>' : ''}
 ${errors.form === undefined ? '' : `<div class="alert alert-error" role="alert">${escapeHtml(errors.form)}</div>`}
-<form id="assignment-form" method="post" action="${escapeHtml(formTarget)}">
+<form id="assignment-form" method="post" action="${escapeHtml(formTarget)}" data-initial-format="${initialFormat}">
   <input type="hidden" name="_csrf" value="${escapeHtml(user.csrfToken)}">
   ${isEdit && baseVersionId !== undefined ? `<input type="hidden" name="baseVersionId" value="${escapeHtml(baseVersionId)}">` : ''}
   <div class="split">
@@ -113,8 +127,16 @@ ${escapeHtml(raw.title)}</textarea>
 ${escapeHtml(raw.description)}</textarea>
           ${fieldError(errors.description)}
         </label>
-        <label class="wide${errors.entryPoint === undefined ? '' : ' has-error'}">Python entry point
-          <input name="entryPoint" value="${escapeHtml(raw.entryPoint)}" placeholder="first_positive" required>
+        <label class="wide${errors.format === undefined ? '' : ' has-error'}">Assignment format
+          <select name="format">
+            <option value="function"${format === 'function' ? ' selected' : ''}>Function — calls a named function and compares the return value</option>
+            <option value="script"${format === 'script' ? ' selected' : ''}>Script — standard input is supplied and standard output is compared</option>
+          </select>
+          <span class="hint">Switching format always creates a new assignment version and a new single-format test suite. Tests must be configured for the new format.</span>
+          ${fieldError(errors.format)}
+        </label>
+        <label class="wide format-field${format === 'script' ? ' is-hidden' : ''}${errors.entryPoint === undefined ? '' : ' has-error'}" data-format-field="function">Python entry point
+          <input name="entryPoint" value="${escapeHtml(raw.entryPoint ?? '')}" placeholder="first_positive"${format === 'function' ? ' required' : ''}>
           <span class="hint">The function name only, such as <code>first_positive</code>. Do not enter a signature or expression.</span>
           ${fieldError(errors.entryPoint)}
         </label>
@@ -129,13 +151,19 @@ ${escapeHtml(raw.description)}</textarea>
       </section>
     </div>
     <div class="stack">
-      <section class="panel" aria-label="Function tests">
+      <div id="format-switch-warning" class="alert alert-warn" role="alert"${format === initialFormat ? ' hidden' : ''}>
+        Switching the assignment format creates a new version and a new test suite. Configure every test for the selected format before saving; existing test rows keep their IDs but not their other fields.
+      </div>
+      <section class="panel" aria-label="Tests">
         <div class="panel-top"><h2>Tests</h2><button type="button" data-add="tests">Add test</button></div>
         ${errors.tests?.message === undefined ? '' : `<div class="pad"><p class="field-error">${escapeHtml(errors.tests.message)}</p></div>`}
         <div data-rows="tests">
-          ${tests.map((test, index) => testRow(test, index, errors.tests?.rows[index] ?? {})).join('')}
+          ${tests.map((test, index) => testRow(test, index, errors.tests?.rows[index] ?? {}, format)).join('')}
         </div>
-        <div class="pad"><p class="hint">Arguments are a JSON array: <code>[]</code> supplies none, <code>[4, -1]</code> supplies two, and <code>[[4, -1]]</code> supplies one list argument. Expected return is a separate JSON value; <code>null</code> means Python <code>None</code>. Use up to ${MAX_ROWS_PER_LIST} tests and ${MAX_JSON_DEPTH} levels of JSON nesting.</p></div>
+        <div class="pad">
+          <p class="hint format-note" data-format-note="function"${format === 'script' ? ' hidden' : ''}>Arguments are a JSON array: <code>[]</code> supplies none, <code>[4, -1]</code> supplies two, and <code>[[4, -1]]</code> supplies one list argument. Expected return is a separate JSON value; <code>null</code> means Python <code>None</code>. Use up to ${MAX_ROWS_PER_LIST} tests and ${MAX_JSON_DEPTH} levels of JSON nesting.</p>
+          <p class="hint format-note" data-format-note="script"${format === 'function' ? ' hidden' : ''}>Standard input is supplied exactly as written, including blank lines and line endings, then closed so the program can read to EOF. Expected stdout is compared after CRLF is converted to LF and at most one final LF is removed. Empty strings are valid. Use up to ${MAX_ROWS_PER_LIST} tests and ${MAX_SCRIPT_FIELD_BYTES / 1024} KiB per field.</p>
+        </div>
       </section>
       <section class="panel pad">
         <h2>Save behavior</h2>
@@ -149,8 +177,8 @@ ${escapeHtml(raw.description)}</textarea>
   </div>
 </form>
 <template id="criteria-template">${criterionRow(blankCriterion(), '__INDEX__', {})}</template>
-<template id="tests-template">${testRow(blankTest(), '__INDEX__', {})}</template>
-<script>${repeatableRowsScript}</script>`;
+<template id="tests-template">${testRow(blankTest(), '__INDEX__', {}, format)}</template>
+<script>${repeatableRowsScript}${formatSwitchScript}</script>`;
 
   return shell({
     title: isEdit ? 'Edit assignment' : 'Configure assignment',
@@ -194,9 +222,10 @@ ${escapeHtml(criterion.expectedBehavior)}</textarea>
 }
 
 function testRow(
-  test: { id: string; arguments: string; expectedReturn: string },
+  test: RawTest,
   index: number | '__INDEX__',
   rowErrors: Record<string, string>,
+  format: AssignmentFormat,
 ): string {
   return `<div class="row-card" data-row>
   <div class="row-head"><span class="row-title">Test</span><button type="button" class="link-button remove-row" data-remove>Remove</button></div>
@@ -205,15 +234,25 @@ function testRow(
       <input name="tests[${index}][id]" value="${escapeHtml(test.id)}" placeholder="t1">
       ${fieldError(rowErrors.id)}
     </label>
-    <label>Positional arguments (JSON array)
+    <label class="format-field${format === 'script' ? ' is-hidden' : ''}" data-format-field="function">Positional arguments (JSON array)
       <textarea name="tests[${index}][arguments]" class="mono" placeholder="[[4, -1]]">
-${escapeHtml(test.arguments)}</textarea>
+${escapeHtml(test.arguments ?? '')}</textarea>
       ${fieldError(rowErrors.arguments)}
     </label>
-    <label>Expected return (JSON value)
+    <label class="format-field${format === 'script' ? ' is-hidden' : ''}" data-format-field="function">Expected return (JSON value)
       <textarea name="tests[${index}][expectedReturn]" class="mono" placeholder="4">
-${escapeHtml(test.expectedReturn)}</textarea>
+${escapeHtml(test.expectedReturn ?? '')}</textarea>
       ${fieldError(rowErrors.expectedReturn)}
+    </label>
+    <label class="format-field${format === 'function' ? ' is-hidden' : ''}" data-format-field="script">Standard input (exact text)
+      <textarea name="tests[${index}][stdin]" class="mono" placeholder="1&#10;2" data-exact-text="${escapeHtml(JSON.stringify(test.stdin ?? ''))}">
+${escapeHtml(test.stdin ?? '')}</textarea>
+      ${fieldError(rowErrors.stdin)}
+    </label>
+    <label class="format-field${format === 'function' ? ' is-hidden' : ''}" data-format-field="script">Expected stdout (exact text)
+      <textarea name="tests[${index}][expectedStdout]" class="mono" placeholder="3" data-exact-text="${escapeHtml(JSON.stringify(test.expectedStdout ?? ''))}">
+${escapeHtml(test.expectedStdout ?? '')}</textarea>
+      ${fieldError(rowErrors.expectedStdout)}
     </label>
   </div>
 </div>`;
@@ -227,8 +266,14 @@ function blankCriterion(): { id: string; description: string; expectedBehavior: 
   return { id: '', description: '', expectedBehavior: '' };
 }
 
-function blankTest(): { id: string; arguments: string; expectedReturn: string } {
-  return { id: '', arguments: '', expectedReturn: '' };
+function blankTest(): RawTest {
+  return {
+    id: '',
+    arguments: '',
+    expectedReturn: '',
+    stdin: '',
+    expectedStdout: '',
+  };
 }
 
 export interface AssignmentDetailPageOptions {
@@ -254,7 +299,7 @@ export function assignmentDetailPage({
   const body = `<div class="head">
   <div>
     <h1>${escapeHtml(version.title)}</h1>
-    <p class="muted">Version ${version.versionNumber} · Function assignment · saved by ${escapeHtml(version.createdBy.email)} on ${escapeHtml(formatTimestamp(version.createdAt))}</p>
+    <p class="muted">Version ${version.versionNumber} · ${formatLabel(version.format)} assignment · saved by ${escapeHtml(version.createdBy.email)} on ${escapeHtml(formatTimestamp(version.createdAt))}</p>
   </div>
   <div class="actions">
     ${isActive ? `<a class="button primary" href="${base}/edit?version=${encodeURIComponent(version.id)}">Edit assignment</a>` : ''}
@@ -270,7 +315,9 @@ ${runHistory(version.assignmentId, runs)}
 <div class="meta-grid end">
   <div class="metric"><span class="small">Rubric</span><strong>${plural(version.criteria.length, 'criterion', 'criteria')}</strong><span class="small mono">${escapeHtml(version.rubricVersionId)}</span></div>
   <div class="metric"><span class="small">Tests</span><strong>${plural(version.tests.length, 'test')}</strong><span class="small mono">${escapeHtml(version.testSuiteVersionId)}</span></div>
-  <div class="metric"><span class="small">Entry point</span><strong class="mono">${escapeHtml(version.entryPoint)}</strong><span class="small">Returns a value</span></div>
+  ${version.format === 'function'
+    ? `<div class="metric"><span class="small">Entry point</span><strong class="mono">${escapeHtml(version.entryPoint)}</strong><span class="small">Returns a value</span></div>`
+    : `<div class="metric"><span class="small">Input</span><strong class="small">Standard input</strong><span class="small">Compares stdout</span></div>`}
 </div>
 <div class="stack end">
   <section class="panel pad">
@@ -294,9 +341,10 @@ ${runHistory(version.assignmentId, runs)}
     </table></div>
   </section>
   <section class="panel">
-    <div class="panel-top"><h2>Tests · version ${escapeHtml(shortId(version.testSuiteVersionId))}</h2><span class="tag">${COMPARISON_RULE}</span></div>
+    <div class="panel-top"><h2>Tests · version ${escapeHtml(shortId(version.testSuiteVersionId))}</h2><span class="tag">${version.format === 'script' ? SCRIPT_COMPARISON_RULE : COMPARISON_RULE}</span></div>
     <div class="table-wrap"><table>
-      <thead><tr><th>#</th><th>ID</th><th>Positional arguments</th><th>Expected return</th></tr></thead>
+      ${version.format === 'function'
+        ? `<thead><tr><th>#</th><th>ID</th><th>Positional arguments</th><th>Expected return</th></tr></thead>
       <tbody>${version.tests
         .map(
           (test, index) => `<tr>
@@ -306,7 +354,18 @@ ${runHistory(version.assignmentId, runs)}
         <td><code>${escapeHtml(formatJsonForDisplay(parseJsonValue(test.expectedReturnJson)))}</code></td>
       </tr>`,
         )
-        .join('')}</tbody>
+        .join('')}</tbody>`
+        : `<thead><tr><th>#</th><th>ID</th><th>Standard input</th><th>Expected stdout</th></tr></thead>
+      <tbody>${version.tests
+        .map(
+          (test, index) => `<tr>
+        <td>${index + 1}</td>
+        <td><code>${escapeHtml(test.id)}</code></td>
+        <td><pre class="code">${escapeHtml(formatScript(test.stdin))}</pre>${scriptWhitespaceView(test.stdin)}</td>
+        <td><pre class="code">${escapeHtml(formatScript(test.expectedStdout))}</pre>${scriptWhitespaceView(test.expectedStdout)}</td>
+      </tr>`,
+        )
+        .join('')}</tbody>`}
     </table></div>
   </section>
   <section class="panel pad">
@@ -315,7 +374,7 @@ ${runHistory(version.assignmentId, runs)}
       <label>Rubric version ID<input class="mono" value="${escapeHtml(version.rubricVersionId)}" readonly></label>
       <label>Test suite version ID<input class="mono" value="${escapeHtml(version.testSuiteVersionId)}" readonly></label>
       <label>Assignment version ID<input class="mono" value="${escapeHtml(version.id)}" readonly></label>
-      <label>Comparison rule<input value="${COMPARISON_RULE}" readonly></label>
+      <label>Comparison rule<input value="${version.format === 'script' ? SCRIPT_COMPARISON_RULE : COMPARISON_RULE}" readonly></label>
     </div>
   </section>
 </div>`;
@@ -334,7 +393,7 @@ function uploadPanel(
 ): string {
   return `<section class="panel pad end" aria-label="Run tests">
   <h2>Run tests</h2>
-  <p class="muted small">Upload one synthetic Python file. Each test runs in a fresh isolated native Python execution. Results stay pinned to version ${version.versionNumber} and its exact test suite, even after you edit the assignment.</p>
+  <p class="muted small">Upload one synthetic Python file. Each test runs in a fresh isolated native Python execution${version.format === 'script' ? ' with the configured standard input closed at EOF' : ''}. Results stay pinned to version ${version.versionNumber} and its exact test suite, even after you edit the assignment.</p>
   <form method="post" action="${base}/runs" enctype="multipart/form-data" class="actions">
     <input type="hidden" name="_csrf" value="${escapeHtml(user.csrfToken)}">
     <input type="hidden" name="versionId" value="${escapeHtml(version.id)}">
@@ -406,6 +465,15 @@ export function formatTimestamp(iso: string): string {
 
 function shortId(id: string): string {
   return id.slice(0, 8);
+}
+
+function formatLabel(format: AssignmentFormat): string {
+  return format === 'script' ? 'Script' : 'Function';
+}
+
+function scriptWhitespaceView(text: string): string {
+  if (text === '') return '';
+  return `<details><summary class="small">Whitespace view</summary><pre class="code small">${escapeHtml(visibleWhitespace(text))}</pre></details>`;
 }
 
 function plural(count: number, singular: string, pluralForm?: string): string {

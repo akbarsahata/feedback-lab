@@ -1,10 +1,15 @@
 import { canonicalizeJson, JsonParseError, parseJsonValue } from './json';
 
 export const COMPARISON_RULE = 'function-value-v1';
-
+export const SCRIPT_COMPARISON_RULE = 'script-stdout-v1';
 export const MAX_ROWS_PER_LIST = 100;
 export const MAX_CONFIG_MIB = 1;
+export const MAX_SCRIPT_FIELD_BYTES = 16 * 1024;
 const encoder = new TextEncoder();
+const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+export type AssignmentFormat = 'function' | 'script';
+export type ComparisonRule = typeof COMPARISON_RULE | typeof SCRIPT_COMPARISON_RULE;
 
 export interface RawCriterion {
   id: string;
@@ -14,32 +19,55 @@ export interface RawCriterion {
 
 export interface RawTest {
   id: string;
-  arguments: string;
-  expectedReturn: string;
+  arguments?: string;
+  expectedReturn?: string;
+  stdin?: string;
+  expectedStdout?: string;
 }
 
 export interface RawConfig {
   title: string;
   description: string;
-  entryPoint: string;
+  format?: AssignmentFormat;
+  entryPoint?: string;
   criteria: RawCriterion[];
   tests: RawTest[];
 }
 
-export interface TestCase {
+export interface FunctionTestCase {
   id: string;
   argumentsJson: string;
   expectedReturnJson: string;
   comparisonRule: typeof COMPARISON_RULE;
 }
 
-export interface ValidatedConfig {
+export interface ScriptTestCase {
+  id: string;
+  stdin: string;
+  expectedStdout: string;
+  comparisonRule: typeof SCRIPT_COMPARISON_RULE;
+}
+
+export type TestCase = FunctionTestCase | ScriptTestCase;
+
+interface ValidatedConfigBase {
   title: string;
   description: string;
-  entryPoint: string;
   criteria: RawCriterion[];
-  tests: TestCase[];
 }
+
+export type FunctionConfig = ValidatedConfigBase & {
+  format: 'function';
+  entryPoint: string;
+  tests: FunctionTestCase[];
+};
+
+export type ScriptConfig = ValidatedConfigBase & {
+  format: 'script';
+  tests: ScriptTestCase[];
+};
+
+export type ValidatedConfig = FunctionConfig | ScriptConfig;
 
 export type RowFieldErrors = Record<string, string>;
 
@@ -51,6 +79,7 @@ export interface RowGroupErrors {
 export interface ConfigErrors {
   title?: string;
   description?: string;
+  format?: string;
   entryPoint?: string;
   criteria?: RowGroupErrors;
   tests?: RowGroupErrors;
@@ -126,8 +155,12 @@ export function validateConfig(raw: RawConfig): ConfigValidation {
   const errors: ConfigErrors = {};
   const title = configText(raw.title);
   const description = configText(raw.description);
-  const enteredName = raw.entryPoint.trim();
-  const entryPoint = enteredName.normalize('NFKC');
+  const format = raw.format ?? 'function';
+
+  if (format !== 'function' && format !== 'script') {
+    errors.format = 'Choose Function or Script.';
+    return { ok: false, errors };
+  }
 
   if (title === '') {
     errors.title = 'Enter a title.';
@@ -137,13 +170,21 @@ export function validateConfig(raw: RawConfig): ConfigValidation {
     errors.description = 'Enter a task description.';
   }
 
-  if (enteredName === '') {
-    errors.entryPoint = 'Enter the function name the tests should call.';
-  } else if (!isPythonIdentifier(enteredName)) {
+  const enteredName = (raw.entryPoint ?? '').trim();
+  const entryPoint = enteredName.normalize('NFKC');
+
+  if (format === 'function') {
+    if (enteredName === '') {
+      errors.entryPoint = 'Enter the function name the tests should call.';
+    } else if (!isPythonIdentifier(enteredName)) {
+      errors.entryPoint =
+        'Use a Python identifier such as first_positive (letters, digits, and underscores, not starting with a digit). Enter a function name only.';
+    } else if (PYTHON_KEYWORDS.has(entryPoint)) {
+      errors.entryPoint = `"${entryPoint}" is a Python keyword. Choose a different function name.`;
+    }
+  } else if (enteredName !== '') {
     errors.entryPoint =
-      'Use a Python identifier such as first_positive (letters, digits, and underscores, not starting with a digit). Enter a function name only.';
-  } else if (PYTHON_KEYWORDS.has(entryPoint)) {
-    errors.entryPoint = `"${entryPoint}" is a Python keyword. Choose a different function name.`;
+      'Script assignments do not have an entry point. Remove the function name or choose the Function format.';
   }
 
   const criteria = validateRows(
@@ -156,23 +197,30 @@ export function validateConfig(raw: RawConfig): ConfigValidation {
       return { id, description, expectedBehavior };
     },
   );
-  const tests = validateRows(
-    raw.tests, errors, 'tests',
-    (row, id, rowErrors): TestCase => ({
-      id,
-      argumentsJson: validateTestJson(row.arguments, 'arguments', rowErrors),
-      expectedReturnJson: validateTestJson(row.expectedReturn, 'expectedReturn', rowErrors),
-      comparisonRule: COMPARISON_RULE,
-    }),
-  );
+  const base = { title, description, criteria };
+  const config: ValidatedConfig = format === 'function'
+    ? {
+        ...base,
+        format,
+        entryPoint,
+        tests: validateRows(raw.tests, errors, 'tests', validateFunctionTest, hasScriptFields),
+      }
+    : {
+        ...base,
+        format,
+        tests: validateRows(raw.tests, errors, 'tests', validateScriptTest, hasFunctionFields),
+      };
 
   if (Object.keys(errors).length > 0) {
     return { ok: false, errors };
   }
 
-  const bytes = [title, description, entryPoint,
+  const bytes = [
+    title,
+    description,
+    ...(format === 'function' ? [entryPoint] : []),
     ...criteria.flatMap((row) => [row.id, row.description, row.expectedBehavior]),
-    ...tests.flatMap((row) => [row.id, row.argumentsJson, row.expectedReturnJson]),
+    ...config.tests.flatMap(testText),
   ].reduce((size, text) => size + encoder.encode(text).byteLength, 0);
   if (bytes > MAX_CONFIG_MIB * 1024 * 1024) {
     return {
@@ -181,7 +229,91 @@ export function validateConfig(raw: RawConfig): ConfigValidation {
     };
   }
 
-  return { ok: true, config: { title, description, entryPoint, criteria, tests } };
+  return { ok: true, config };
+}
+
+function testText(test: TestCase): string[] {
+  return test.comparisonRule === COMPARISON_RULE
+    ? [test.id, test.argumentsJson, test.expectedReturnJson]
+    : [test.id, test.stdin, test.expectedStdout];
+}
+
+function validateFunctionTest(
+  row: RawTest,
+  id: string,
+  rowErrors: RowFieldErrors,
+): FunctionTestCase {
+  if (row.stdin !== undefined) {
+    rowErrors.stdin = 'Standard input belongs to a Script assignment. Remove it or choose the Script format.';
+  }
+  if (row.expectedStdout !== undefined) {
+    rowErrors.expectedStdout = 'Expected stdout belongs to a Script assignment. Remove it or choose the Script format.';
+  }
+  return {
+    id,
+    argumentsJson: validateTestJson(row.arguments ?? '', 'arguments', rowErrors),
+    expectedReturnJson: validateTestJson(row.expectedReturn ?? '', 'expectedReturn', rowErrors),
+    comparisonRule: COMPARISON_RULE,
+  };
+}
+
+function validateScriptTest(
+  row: RawTest,
+  id: string,
+  rowErrors: RowFieldErrors,
+): ScriptTestCase {
+  if (row.arguments !== undefined) {
+    rowErrors.arguments = 'Positional arguments belong to a Function assignment. Remove them or choose the Function format.';
+  }
+  if (row.expectedReturn !== undefined) {
+    rowErrors.expectedReturn = 'Expected return belongs to a Function assignment. Remove it or choose the Function format.';
+  }
+  return {
+    id,
+    stdin: validateScriptText(row.stdin, 'stdin', rowErrors),
+    expectedStdout: validateScriptText(row.expectedStdout, 'expectedStdout', rowErrors),
+    comparisonRule: SCRIPT_COMPARISON_RULE,
+  };
+}
+
+function validateScriptText(
+  value: string | undefined,
+  field: 'stdin' | 'expectedStdout',
+  rowErrors: RowFieldErrors,
+): string {
+  const label = field === 'stdin' ? 'Standard input' : 'Expected stdout';
+  if (value === undefined) {
+    rowErrors[field] = field === 'stdin'
+      ? 'Enter standard input. Use an empty string when the test supplies no input.'
+      : 'Enter expected stdout. Use an empty string when the test expects no output.';
+    return '';
+  }
+  if (!roundTripsAsUtf8(value)) {
+    rowErrors[field] = `${label} must be valid UTF-8 text.`;
+    return value;
+  }
+  const size = encoder.encode(value).byteLength;
+  if (size > MAX_SCRIPT_FIELD_BYTES) {
+    rowErrors[field] =
+      `${label} exceeds ${MAX_SCRIPT_FIELD_BYTES / 1024} KiB (${size} bytes). Shorten it and try again.`;
+  }
+  return value;
+}
+
+function roundTripsAsUtf8(value: string): boolean {
+  try {
+    return decoder.decode(encoder.encode(value)) === value;
+  } catch {
+    return false;
+  }
+}
+
+function hasScriptFields(row: RawTest): boolean {
+  return row.stdin !== undefined || row.expectedStdout !== undefined;
+}
+
+function hasFunctionFields(row: RawTest): boolean {
+  return row.arguments !== undefined || row.expectedReturn !== undefined;
 }
 
 function validateRows<RawRow extends { id: string }, SavedRow>(
@@ -189,11 +321,14 @@ function validateRows<RawRow extends { id: string }, SavedRow>(
   errors: ConfigErrors,
   key: 'criteria' | 'tests',
   validateFields: (row: RawRow, id: string, rowErrors: RowFieldErrors) => SavedRow,
+  keepBlankRow?: (row: RawRow) => boolean,
 ): SavedRow[] {
   const isRubric = key === 'criteria';
   const rows = rawRows
     .map((row, index) => ({ row, index }))
-    .filter(({ row }) => Object.values(row).some((value) => value.trim() !== ''));
+    .filter(({ row }) => keepBlankRow?.(row) || Object.values(row).some(
+      (value) => typeof value === 'string' && value.trim() !== '',
+    ));
 
   const group: RowGroupErrors = { rows: {} };
   const saved: SavedRow[] = [];
@@ -274,11 +409,19 @@ function configText(value: string): string {
 }
 
 export function compareConfigs(a: ValidatedConfig, b: ValidatedConfig): ConfigChanges {
+  if (a.format !== b.format) {
+    return {
+      metadata: true,
+      rubric: !criteriaEqual(a.criteria, b.criteria),
+      tests: true,
+    };
+  }
+  const metadata =
+    a.title !== b.title ||
+    a.description !== b.description ||
+    (a.format === 'function' && b.format === 'function' && a.entryPoint !== b.entryPoint);
   return {
-    metadata:
-      a.title !== b.title ||
-      a.description !== b.description ||
-      a.entryPoint !== b.entryPoint,
+    metadata,
     rubric: !criteriaEqual(a.criteria, b.criteria),
     tests: !testsEqual(a.tests, b.tests),
   };
@@ -303,11 +446,23 @@ function criteriaEqual(a: RawCriterion[], b: RawCriterion[]): boolean {
 function testsEqual(a: TestCase[], b: TestCase[]): boolean {
   return (
     a.length === b.length &&
-    a.every(
-      (test, index) =>
-        test.id === b[index]?.id &&
-        test.argumentsJson === b[index]?.argumentsJson &&
-        test.expectedReturnJson === b[index]?.expectedReturnJson,
-    )
+    a.every((test, index) => {
+      const other = b[index];
+      if (other === undefined || test.id !== other.id) return false;
+      if (test.comparisonRule !== other.comparisonRule) return false;
+      if (test.comparisonRule === COMPARISON_RULE && other.comparisonRule === COMPARISON_RULE) {
+        return (
+          test.argumentsJson === other.argumentsJson &&
+          test.expectedReturnJson === other.expectedReturnJson
+        );
+      }
+      if (
+        test.comparisonRule === SCRIPT_COMPARISON_RULE &&
+        other.comparisonRule === SCRIPT_COMPARISON_RULE
+      ) {
+        return test.stdin === other.stdin && test.expectedStdout === other.expectedStdout;
+      }
+      return false;
+    })
   );
 }

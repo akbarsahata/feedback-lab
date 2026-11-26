@@ -1,6 +1,14 @@
 import {
+  COMPARISON_RULE,
+  SCRIPT_COMPARISON_RULE,
   compareConfigs,
   isChanged,
+  type AssignmentFormat,
+  type FunctionConfig,
+  type FunctionTestCase,
+  type RawCriterion,
+  type ScriptConfig,
+  type ScriptTestCase,
   type TestCase,
   type ValidatedConfig,
 } from './config';
@@ -27,6 +35,7 @@ export interface AssignmentSummary {
   activeVersionId: string;
   versionNumber: number;
   title: string;
+  format: AssignmentFormat;
   criteriaCount: number;
   testsCount: number;
   updatedAt: string;
@@ -40,11 +49,24 @@ interface VersionIdentity {
   testSuiteVersionId: string;
 }
 
-export interface AssignmentVersionDetail extends VersionIdentity, ValidatedConfig {
-  format: 'function';
+interface AssignmentVersionBase extends VersionIdentity {
+  title: string;
+  description: string;
+  criteria: RawCriterion[];
   createdAt: string;
   createdBy: { id: string; email: string };
 }
+
+export type AssignmentVersionDetail =
+  | (AssignmentVersionBase & {
+      format: 'function';
+      entryPoint: string;
+      tests: FunctionTestCase[];
+    })
+  | (AssignmentVersionBase & {
+      format: 'script';
+      tests: ScriptTestCase[];
+    });
 
 export interface AssignmentVersionSummary {
   id: string;
@@ -61,8 +83,8 @@ interface VersionRow {
   version_number: number;
   title: string;
   description: string;
-  format: 'function';
-  entry_point: string;
+  format: AssignmentFormat;
+  entry_point: string | null;
   rubric_version_id: string;
   test_suite_version_id: string;
   created_at: string;
@@ -78,6 +100,7 @@ export async function listAssignments(db: D1Database): Promise<AssignmentSummary
               a.updated_at AS updated_at,
               v.version_number AS version_number,
               v.title AS title,
+              v.format AS format,
               (SELECT COUNT(*) FROM rubric_criteria rc
                 WHERE rc.rubric_version_id = v.rubric_version_id) AS criteria_count,
               (SELECT COUNT(*) FROM tests t
@@ -92,6 +115,7 @@ export async function listAssignments(db: D1Database): Promise<AssignmentSummary
       updated_at: string;
       version_number: number;
       title: string;
+      format: AssignmentFormat;
       criteria_count: number;
       tests_count: number;
     }>();
@@ -101,6 +125,7 @@ export async function listAssignments(db: D1Database): Promise<AssignmentSummary
     activeVersionId: row.active_version_id,
     versionNumber: row.version_number,
     title: row.title,
+    format: row.format,
     criteriaCount: row.criteria_count,
     testsCount: row.tests_count,
     updatedAt: row.updated_at,
@@ -284,14 +309,15 @@ function versionInsert(
     `INSERT INTO assignment_versions
       (id, assignment_id, version_number, title, description, format, entry_point,
        rubric_version_id, test_suite_version_id, created_at, created_by)
-     VALUES (?, ?, ?, ?, ?, 'function', ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
     version.id,
     version.assignmentId,
     version.versionNumber,
     config.title,
     config.description,
-    config.entryPoint,
+    config.format,
+    config.format === 'function' ? config.entryPoint : null,
     version.rubricVersionId,
     version.testSuiteVersionId,
     now,
@@ -329,7 +355,8 @@ async function loadVersionDetail(
       .all<{ criterion_id: string; description: string; expected_behavior: string }>(),
     db
       .prepare(
-        `SELECT test_id, arguments_json, expected_return_json, comparison_rule
+        `SELECT test_id, arguments_json, expected_return_json, stdin,
+                expected_stdout, comparison_rule
          FROM tests
          WHERE test_suite_version_id = ?
          ORDER BY position ASC`,
@@ -337,20 +364,20 @@ async function loadVersionDetail(
       .bind(row.test_suite_version_id)
       .all<{
         test_id: string;
-        arguments_json: string;
-        expected_return_json: string;
+        arguments_json: string | null;
+        expected_return_json: string | null;
+        stdin: string | null;
+        expected_stdout: string | null;
         comparison_rule: TestCase['comparisonRule'];
       }>(),
   ]);
 
-  return {
+  const base = {
     id: row.id,
     assignmentId: row.assignment_id,
     versionNumber: row.version_number,
     title: row.title,
     description: row.description,
-    format: row.format,
-    entryPoint: row.entry_point,
     rubricVersionId: row.rubric_version_id,
     testSuiteVersionId: row.test_suite_version_id,
     createdAt: row.created_at,
@@ -360,12 +387,43 @@ async function loadVersionDetail(
       description: criterion.description,
       expectedBehavior: criterion.expected_behavior,
     })),
-    tests: testsResult.results.map((test) => ({
-      id: test.test_id,
-      argumentsJson: test.arguments_json,
-      expectedReturnJson: test.expected_return_json,
-      comparisonRule: test.comparison_rule,
-    })),
+  };
+
+  if (row.format === 'function') {
+    return {
+      ...base,
+      format: 'function',
+      entryPoint: row.entry_point ?? '',
+      tests: testsResult.results.map((test): FunctionTestCase => {
+        if (test.comparison_rule !== COMPARISON_RULE || test.arguments_json === null
+          || test.expected_return_json === null) {
+          throw new Error('The saved function test is inconsistent with its assignment version.');
+        }
+        return {
+          id: test.test_id,
+          argumentsJson: test.arguments_json,
+          expectedReturnJson: test.expected_return_json,
+          comparisonRule: test.comparison_rule,
+        };
+      }),
+    };
+  }
+
+  return {
+    ...base,
+    format: 'script',
+    tests: testsResult.results.map((test): ScriptTestCase => {
+      if (test.comparison_rule !== SCRIPT_COMPARISON_RULE || test.stdin === null
+        || test.expected_stdout === null) {
+        throw new Error('The saved script test is inconsistent with its assignment version.');
+      }
+      return {
+        id: test.test_id,
+        stdin: test.stdin,
+        expectedStdout: test.expected_stdout,
+        comparisonRule: test.comparison_rule,
+      };
+    }),
   };
 }
 
@@ -408,21 +466,37 @@ function testSuiteStatements(
       .prepare('INSERT INTO test_suite_versions (id, created_at) VALUES (?, ?)')
       .bind(testSuiteVersionId, now),
     ...config.tests.map((test, position) =>
-      db
-        .prepare(
-          `INSERT INTO tests
-            (test_suite_version_id, position, test_id, arguments_json,
-             expected_return_json, comparison_rule)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          testSuiteVersionId,
-          position,
-          test.id,
-          test.argumentsJson,
-          test.expectedReturnJson,
-          test.comparisonRule,
-        ),
+      test.comparisonRule === COMPARISON_RULE
+        ? db
+          .prepare(
+            `INSERT INTO tests
+              (test_suite_version_id, position, test_id, arguments_json,
+               expected_return_json, comparison_rule)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            testSuiteVersionId,
+            position,
+            test.id,
+            test.argumentsJson,
+            test.expectedReturnJson,
+            test.comparisonRule,
+          )
+        : db
+          .prepare(
+            `INSERT INTO tests
+              (test_suite_version_id, position, test_id, stdin,
+               expected_stdout, comparison_rule)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            testSuiteVersionId,
+            position,
+            test.id,
+            test.stdin,
+            test.expectedStdout,
+            test.comparisonRule,
+          ),
     ),
   ];
 }

@@ -1,6 +1,8 @@
 import { getSession, type SessionUser } from './auth';
+import { errorResponseSchema } from './api-schemas';
 import { messagePage } from './html';
-import { htmlResponse, jsonResponse, redirect } from './http';
+import { htmlResponse, redirect } from './http';
+import { validatedJsonResponse } from './validated-response';
 
 export type Guarded =
   | { ok: true; session: SessionUser }
@@ -15,7 +17,10 @@ export async function requireResearcher(
 
   if (session === null) {
     if (mode === 'api') {
-      return { ok: false, response: jsonResponse({ error: 'unauthenticated' }, 401) };
+      return {
+        ok: false,
+        response: validatedJsonResponse(errorResponseSchema, { error: 'unauthenticated' }, 401),
+      };
     }
     const url = new URL(request.url);
     const next = encodeURIComponent(`${url.pathname}${url.search}`);
@@ -24,7 +29,10 @@ export async function requireResearcher(
 
   if (session.role !== 'researcher') {
     if (mode === 'api') {
-      return { ok: false, response: jsonResponse({ error: 'forbidden' }, 403) };
+      return {
+        ok: false,
+        response: validatedJsonResponse(errorResponseSchema, { error: 'forbidden' }, 403),
+      };
     }
     return {
       ok: false,

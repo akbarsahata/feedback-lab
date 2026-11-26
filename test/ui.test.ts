@@ -1,7 +1,7 @@
 import { SELF } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { countRows, postForm, postJson, seedUser, signIn, type SignedIn } from './helpers';
-import { assignmentConfig, type SerializedVersion } from './fixtures';
+import { assignmentConfig, scriptConfig, type SerializedVersion } from './fixtures';
 import type { RawConfig } from '../src/config';
 
 const BASE_URL = 'https://feedback-lab.test';
@@ -10,10 +10,12 @@ function formFields(
   config: RawConfig,
   baseVersionId?: string,
 ): Record<string, string> {
+  const format = config.format ?? 'function';
   const fields: Record<string, string> = {
     title: config.title,
     description: config.description,
-    entryPoint: config.entryPoint,
+    format,
+    entryPoint: config.entryPoint ?? '',
   };
   if (baseVersionId !== undefined) {
     fields.baseVersionId = baseVersionId;
@@ -25,8 +27,13 @@ function formFields(
   });
   config.tests.forEach((test, index) => {
     fields[`tests[${index}][id]`] = test.id;
-    fields[`tests[${index}][arguments]`] = test.arguments;
-    fields[`tests[${index}][expectedReturn]`] = test.expectedReturn;
+    if (format === 'script') {
+      fields[`tests[${index}][stdin]`] = test.stdin ?? '';
+      fields[`tests[${index}][expectedStdout]`] = test.expectedStdout ?? '';
+    } else {
+      fields[`tests[${index}][arguments]`] = test.arguments ?? '';
+      fields[`tests[${index}][expectedReturn]`] = test.expectedReturn ?? '';
+    }
   });
   return fields;
 }
@@ -622,3 +629,143 @@ describe('stale HTML saves', () => {
     expect(active).toContain('Version 2');
   });
 });
+
+describe('script assignments in the HTML editor', () => {
+  it('creates and reopens exact script input and expected stdout', async () => {
+    const researcher = await signIn(await seedUser());
+    const config = scriptConfig({
+      tests: [
+        { id: 'exact', stdin: '\r\n  leading  \r\n\r\n', expectedStdout: '  answer  \r\n\r\n' },
+        { id: 'empty', stdin: '', expectedStdout: '' },
+      ],
+    });
+    const assignmentId = await createViaHtml(researcher, config);
+    const base = `/assignments/${assignmentId}`;
+
+    const detail = await (await get(base, researcher)).text();
+    expect(detail).toContain('Script assignment');
+    expect(detail).toContain('Standard input');
+    expect(detail).toContain('Expected stdout');
+    expect(detail).toContain('script-stdout-v1');
+    expect(detail).toContain('(empty string)');
+
+    const edit = await (await get(`${base}/edit`, researcher)).text();
+    expect(edit).toContain('value="script" selected');
+    expect(scriptTextarea(edit, 'stdin')).toBe('\r\n  leading  \r\n\r\n');
+    expect(scriptTextarea(edit, 'expectedStdout')).toBe('  answer  \r\n\r\n');
+    expect(scriptTextarea(edit, 'stdin', 1)).toBe('');
+    expect(scriptTextarea(edit, 'expectedStdout', 1)).toBe('');
+  });
+
+  it('warns about a format switch and preserving text on validation errors', async () => {
+    const researcher = await signIn(await seedUser());
+    const createPage = await (await get('/assignments/new', researcher)).text();
+    expect(createPage).toContain('Switching format always creates a new assignment version');
+    expect(createPage).toContain('Tests must be configured for the new format');
+    expect(createPage).toContain('data-format-field="script"');
+    expect(createPage).toContain('id="format-switch-warning"');
+
+    const invalid = scriptConfig({
+      tests: [
+        { id: 'same', stdin: '  first\r\n', expectedStdout: '  output  \r\n' },
+        { id: 'same', stdin: '', expectedStdout: '' },
+      ],
+    });
+    const response = await postForm('/assignments', formFields(invalid), researcher);
+    expect(response.status).toBe(422);
+    const html = await response.text();
+    expect(html).toContain('already used in this test suite');
+    expect(scriptTextarea(html, 'stdin')).toBe('  first\r\n');
+    expect(scriptTextarea(html, 'expectedStdout')).toBe('  output  \r\n');
+    expect(await countRows('assignments')).toBe(0);
+  });
+
+  it('creates a new version and suite on a format switch while old function evidence stays readable', async () => {
+    const researcher = await signIn(await seedUser());
+    const original = await createViaApi(researcher);
+    const base = `/assignments/${original.assignmentId}`;
+
+    const switched = await postForm(
+      base,
+      formFields(scriptConfig({ title: 'Add two numbers script' }), original.id),
+      researcher,
+    );
+    expect(switched.status).toBe(303);
+    expect(switched.headers.get('location')).toBe(base);
+
+    const active = await (await get(base, researcher)).text();
+    expect(active).toContain('Script assignment');
+    expect(active).toContain('Version 2');
+    expect(active).toContain('Add two numbers script');
+    expect(active).toContain('Standard input');
+
+    const history = await (await get(`${base}/history`, researcher)).text();
+    expect(history).toContain('Version 2');
+    expect(history).toContain('Version 1');
+    expect(history.indexOf('Version 2')).toBeLessThan(history.indexOf('Version 1'));
+
+    const old = await (await get(`${base}/versions/${original.id}`, researcher)).text();
+    expect(old).toContain('Function assignment');
+    expect(old).toContain('not the active version');
+    expect(old).toContain('[[4, -1]]');
+    expect(old).toContain('first_positive');
+    expect(old).not.toContain('Add two numbers script');
+
+    const noOp = await postForm(
+      base,
+      formFields(scriptConfig({ title: 'Add two numbers script' }), original.id),
+      researcher,
+    );
+    // The function base is stale now; a no-op must reuse the script active version.
+    expect(noOp.status).toBe(409);
+  });
+
+  it('saves unchanged script text as a no-op and keeps whitespace-distinct expectations as a change', async () => {
+    const researcher = await signIn(await seedUser());
+    const assignmentId = await createViaHtml(researcher, scriptConfig());
+    const base = `/assignments/${assignmentId}`;
+    const active = await (await get(`${base}/edit`, researcher)).text();
+    const baseVersionId = /name="baseVersionId" value="([^"]+)"/.exec(active)?.[1];
+    expect(baseVersionId).toBeTruthy();
+
+    const fields = formFields(scriptConfig(), baseVersionId);
+    delete fields['tests[0][stdin]'];
+    delete fields['tests[0][expectedStdout]'];
+    fields['tests[0][stdinText]'] = '"1\\n2\\n"';
+    fields['tests[0][expectedStdoutText]'] = '"3\\n"';
+    const unchanged = await postForm(base, fields, researcher);
+    expect(unchanged.status).toBe(303);
+    expect(unchanged.headers.get('location')).toBe(`${base}?notice=unchanged`);
+
+    const distinct = scriptConfig({
+      tests: [
+        { id: 'two-values', stdin: '1\n2\n', expectedStdout: '3\n\n' },
+        { id: 'empty', stdin: '', expectedStdout: '' },
+      ],
+    });
+    const changed = await postForm(base, formFields(distinct, baseVersionId), researcher);
+    expect(changed.status).toBe(303);
+    expect(changed.headers.get('location')).toBe(base);
+    expect(await countRows('assignment_versions')).toBe(2);
+
+    const old = await (await get(`${base}/versions/${baseVersionId}`, researcher)).text();
+    expect(old).toContain('Version 1');
+  });
+});
+
+function scriptTextarea(
+  html: string,
+  field: 'stdin' | 'expectedStdout',
+  index = 0,
+): string {
+  const markup = new RegExp(
+    `<textarea name="tests\\[${index}\\]\\[${field}\\]"[^>]*>\\n([\\s\\S]*?)</textarea>`,
+  ).exec(html);
+  expect(markup).not.toBeNull();
+  return markup![1]!
+    .replaceAll('&quot;', '"')
+    .replaceAll('&#39;', "'")
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&amp;', '&');
+}

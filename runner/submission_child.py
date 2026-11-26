@@ -12,6 +12,7 @@ import importlib.util
 import json
 import math
 import os
+import runpy
 import sys
 import traceback
 from typing import Any
@@ -86,26 +87,41 @@ def main() -> int:
 
     # Do not leave the runner's paths in the submission's argument list.
     sys.argv = ["submission.py"]
+    is_script = job.get("format") == "script"
 
     try:
-        spec = importlib.util.spec_from_file_location("submission", job["sourcePath"])
-        if spec is None or spec.loader is None:
-            raise RuntimeError("submission could not be loaded")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        function = getattr(module, job["entryPoint"])
-        if not callable(function):
-            raise TypeError(f"{job['entryPoint']} is not callable")
-        value = function(*job["arguments"])
+        if is_script:
+            runpy.run_path(job["sourcePath"], run_name="__main__")
+        else:
+            spec = importlib.util.spec_from_file_location("submission", job["sourcePath"])
+            if spec is None or spec.loader is None:
+                raise RuntimeError("submission could not be loaded")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            function = getattr(module, job["entryPoint"])
+            if not callable(function):
+                raise TypeError(f"{job['entryPoint']} is not callable")
+            value = function(*job["arguments"])
     except MemoryError as error:
         detail = "".join(traceback.format_exception(type(error), error, error.__traceback__))
         payload = failure(detail)
         payload["memoryError"] = True
         write_result(result_fd, payload)
         return 0
-    except BaseException as error:  # SystemExit and KeyboardInterrupt are execution errors.
+    except SystemExit as error:
+        if is_script and (error.code is None or error.code == 0):
+            write_result(result_fd, {"outcome": "completed"})
+            return 0
         detail = "".join(traceback.format_exception(type(error), error, error.__traceback__))
         write_result(result_fd, failure(detail))
+        return 0
+    except BaseException as error:  # Unhandled exceptions are execution errors.
+        detail = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        write_result(result_fd, failure(detail))
+        return 0
+
+    if is_script:
+        write_result(result_fd, {"outcome": "completed"})
         return 0
 
     try:

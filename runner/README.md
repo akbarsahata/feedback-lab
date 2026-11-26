@@ -1,6 +1,11 @@
 # Native Python test runner
 
-One job runs one configured test. The submission executes in a fresh child process with a temporary working directory, a sanitized environment, a process-group wall-clock timeout, an address-space limit, and a combined output cap. The runner has no expected value: `function-value-v1` comparison happens in the trusted Worker.
+One job runs one configured test. The submission executes in a fresh child process with a temporary working directory, a sanitized environment, a process-group wall-clock timeout, an address-space limit, and a combined output cap. The runner has no expected value: `function-value-v1` and `script-stdout-v1` comparison happen in the trusted Worker.
+
+Protocol 2 (`native-python-runner/2`) supports both formats. Protocol 1 (`native-python-runner/1`) function jobs still run so pending runs survive a runner rollout.
+
+- **Function jobs** load the source and call `entryPoint(*arguments)`, returning a tagged actual value.
+- **Script jobs** execute the file with `run_name="__main__"` and supply the complete configured UTF-8 stdin byte-for-byte, then close the pipe at EOF. The Worker compares captured stdout after CRLF→LF and at most one final LF is removed. Invalid UTF-8 stdout is returned as a completed execution with `stdoutValid: false`; the Worker records it as an Execution error. Resource limits keep precedence over output interpretation.
 
 ## Contract tests
 
@@ -8,7 +13,9 @@ One job runs one configured test. The submission executes in a fresh child proce
 python3 -m unittest discover -s runner -p 'test_*.py' -v
 ```
 
-The memory-limit test runs only on Linux because macOS does not enforce address-space limits the same way. The harness keeps the evidence descriptor out of the submission child; the child returns only its tagged actual value over a separate pipe.
+The memory-limit test runs only on Linux because macOS does not enforce address-space limits the same way. The harness keeps the evidence descriptor out of the submission child; the child returns only its tagged actual value or script completion envelope over a separate pipe. Script stdin is written by the harness, not embedded in the submission child's argument list.
+
+Script contract tests cover `__main__`, full-size UTF-8 stdin through EOF, empty input and output, a script that does not consume all stdin, CRLF output, nonzero exit, unhandled exceptions, `sys.exit(0)`, invalid stdout, resource limits, legacy protocol 1 jobs, and the private HTTP `/health` and `/run` endpoints.
 
 ## Local one-shot
 
@@ -49,9 +56,16 @@ Before closing issue #2, repeat these against the deployed runner and record the
 | unbounded printing | `output_limit` with partial output retained |
 | memory growth | `memory_limit` |
 | faulty recursion base case | `execution_error` with `RecursionError` |
+| script reading stdin to EOF | completed with byte-exact stdout |
+| script expected `7` printing `7\n` | `Pass` after comparison |
+| script printing `7 ` for expected `7` | `Mismatch` |
+| script exiting nonzero after printing the expected text | `Execution error` |
+| invalid UTF-8 stdout | `Execution error` with lossy preview |
 | outbound request and DNS lookup | denied by the host |
 | disposable app-file and credential canaries | inaccessible |
 | child process spawning | killed with the test's process group |
 | interruption after one completed test | completed result retained; started test becomes infrastructure failure; unstarted tests become not run |
+
+The issue #3 hosted record is pending in [`../docs/verification/issue-3-hosted-runner.md`](../docs/verification/issue-3-hosted-runner.md).
 
 The Python contract tests are regression evidence, not hosted isolation evidence.

@@ -4,6 +4,7 @@ import {
   type ActualValue,
 } from './function-value';
 import { parseJsonValue } from './json';
+import { compareScriptStdout } from './script-output';
 import {
   claimRun,
   finalizeRunIfDone,
@@ -12,10 +13,14 @@ import {
   markRunIncomplete,
   markTestRunning,
   recordTestResult,
+  LEGACY_RUNNER_ARTIFACT,
+  type TestExecutionInput,
   type RunTestSummary,
   type TestRunDetail,
 } from './runs';
 import {
+  LEGACY_RUNNER_PROTOCOL,
+  RUNNER_PROTOCOL,
   RunnerProtocolError,
   createServiceRunner,
   type Runner,
@@ -79,7 +84,7 @@ export async function executeRun(
     if (!(await markTestRunning(env.DB, runId, test.id, now))) return;
 
     const input = await getTestExecutionInput(env.DB, runId, test.id);
-    if (input === null) {
+    if (input === null || input.comparisonRule !== run.comparisonRule) {
       await markRunIncomplete(
         env.DB,
         runId,
@@ -91,7 +96,7 @@ export async function executeRun(
 
     let result: RunnerResult;
     try {
-      result = await runner.runTest(jobFor(run, test, input.argumentsJson, source));
+      result = await runner.runTest(jobFor(run, test, input, source));
     } catch (error) {
       await markRunIncomplete(env.DB, runId, reasonFor(error), clock().toISOString());
       return;
@@ -111,24 +116,34 @@ export async function executeRun(
 function jobFor(
   run: TestRunDetail,
   test: RunTestSummary,
-  argumentsJson: string,
+  input: TestExecutionInput,
   source: string,
 ): RunnerJob {
-  return {
-    protocol: 1,
+  const legacy = run.runnerArtifact === LEGACY_RUNNER_ARTIFACT;
+  const protocol: typeof LEGACY_RUNNER_PROTOCOL | typeof RUNNER_PROTOCOL =
+    legacy ? LEGACY_RUNNER_PROTOCOL : RUNNER_PROTOCOL;
+  const common = {
+    protocol,
     runId: run.id,
     testId: test.id,
-    entryPoint: run.entryPoint,
     source,
-    argumentsJson,
     pythonRelease: run.pythonRelease,
     runnerArtifact: run.runnerArtifact,
     limits: run.limits,
   };
+  if (input.format === 'script') {
+    return { ...common, format: 'script', stdin: input.stdin };
+  }
+  return {
+    ...common,
+    format: 'function',
+    entryPoint: run.entryPoint ?? '',
+    argumentsJson: input.argumentsJson,
+  };
 }
 
 function classify(
-  input: { expectedReturnJson: string },
+  input: TestExecutionInput,
   result: RunnerResult,
 ): {
   status:
@@ -139,8 +154,9 @@ function classify(
     | 'memory_limit'
     | 'output_limit';
   actualJson: string | null;
-  stdout: string;
+  stdout: string | null;
   stderr: string;
+  stdoutLossy: boolean;
   outputTruncated: boolean;
   diagnostic: string | null;
   executionMs: number | null;
@@ -150,6 +166,7 @@ function classify(
   const common = {
     stdout: result.stdout,
     stderr: result.stderr,
+    stdoutLossy: !result.stdoutValid,
     outputTruncated: result.outputTruncated,
     executionMs: result.executionMs,
     startupMs: result.startupMs,
@@ -160,6 +177,31 @@ function classify(
     return {
       ...common,
       status: result.outcome,
+      actualJson: null,
+      diagnostic: result.diagnostic,
+    };
+  }
+
+  if (input.format === 'script') {
+    if (!result.stdoutValid) {
+      return {
+        ...common,
+        status: 'execution_error',
+        actualJson: null,
+        diagnostic: "The script's standard output was not valid UTF-8, so it was not compared.",
+      };
+    }
+    if (result.outputTruncated) {
+      return {
+        ...common,
+        status: 'execution_error',
+        actualJson: null,
+        diagnostic: 'The captured standard output was incomplete, so it was not compared.',
+      };
+    }
+    return {
+      ...common,
+      status: compareScriptStdout(input.expectedStdout, result.stdout) ? 'pass' : 'mismatch',
       actualJson: null,
       diagnostic: result.diagnostic,
     };

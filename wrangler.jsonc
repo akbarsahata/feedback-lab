@@ -13,6 +13,13 @@
     "redact_query_string": true,
     "traces": { "enabled": true }
   },
+  // Pinned same-origin Swagger UI assets. Worker-first routing runs the
+  // researcher guard before any docs asset is served.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/docs", "/api/docs/*"]
+  },
   "ratelimits": [
     {
       "name": "SIGN_IN_LIMITER",

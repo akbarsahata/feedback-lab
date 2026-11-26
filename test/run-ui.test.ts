@@ -11,7 +11,7 @@ import {
   signIn,
   type SignedIn,
 } from './helpers';
-import { assignmentConfig, type SerializedVersion } from './fixtures';
+import { assignmentConfig, scriptConfig, type SerializedVersion } from './fixtures';
 
 const BASE_URL = 'https://feedback-lab.test';
 const SOURCE = 'def first_positive(values):\n    return next((v for v in values if v > 0), None)\n';
@@ -23,6 +23,17 @@ async function createAssignment(session: SignedIn): Promise<SerializedVersion> {
   expect(response.status).toBe(201);
   return body.version as SerializedVersion;
 }
+
+async function createScriptAssignment(
+  session: SignedIn,
+  config = scriptConfig(),
+): Promise<SerializedVersion> {
+  const { response, body } = await postJson('/api/assignments', { config }, session);
+  expect(response.status).toBe(201);
+  return body.version as SerializedVersion;
+}
+
+const SCRIPT_SOURCE = 'import sys\nif __name__ == "__main__":\n    print(sys.stdin.read().upper(), end="")\n';
 
 function uploadForm(
   session: SignedIn,
@@ -133,6 +144,25 @@ describe('run launch', () => {
     expect(await countRows('submission_versions')).toBe(0);
   });
 
+  it('rejects a stale launch after a format switch without creating a run', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createAssignment(researcher);
+    await postJson(`/api/assignments/${version.assignmentId}/versions`, {
+      baseVersionId: version.id,
+      config: scriptConfig({ title: 'Now a script' }),
+    }, researcher);
+
+    const response = await postMultipart(
+      `/assignments/${version.assignmentId}/runs`,
+      uploadForm(researcher, version.id, new File([SOURCE], 'submission.py')),
+      researcher,
+    );
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain('newer assignment version');
+    expect(await countRows('test_runs')).toBe(0);
+    expect(await countRows('submission_versions')).toBe(0);
+  });
+
   it('requires researcher access and a valid CSRF token', async () => {
     const researcher = await signIn(await seedUser());
     const version = await createAssignment(researcher);
@@ -171,12 +201,14 @@ describe('run results', () => {
     const runner: Runner = {
       async runTest(job) {
         return {
+          format: 'function',
           outcome: 'completed',
           actual: job.testId === 'list-argument'
             ? { kind: 'int', value: '4' }
             : { kind: 'none' },
           stdout: 'printed output',
           stderr: '',
+          stdoutValid: true,
           outputTruncated: false,
           diagnostic: null,
           executionMs: 11,
@@ -243,5 +275,171 @@ describe('run results', () => {
     expect(html).toContain('Queued');
     expect(html).toContain('Waiting for the runner');
     expect(html).toContain('Pending');
+  });
+});
+
+describe('script run evidence in the UI', () => {
+  it('shows stdin, expected stdout, captured stdout, stderr, and whitespace markers', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createScriptAssignment(researcher, scriptConfig({
+      tests: [
+        { id: 'exact', stdin: '\r\n  two  \r\n', expectedStdout: '  THREE  \r\n' },
+        { id: 'empty', stdin: '', expectedStdout: '' },
+      ],
+    }));
+    const runId = await launch(researcher, version, SCRIPT_SOURCE);
+    await executeRun(env, runId, {
+      runner: {
+        async runTest(job) {
+          if (job.format !== 'script') throw new Error('expected script job');
+          return {
+            format: 'script',
+            outcome: 'completed',
+            actual: null,
+            stdout: job.testId === 'exact'
+              ? '  THREE  \r\n'
+              : '<script>alert(1)</script>',
+            stderr: 'diagnostic <b>text</b>',
+            stdoutValid: true,
+            outputTruncated: false,
+            diagnostic: null,
+            executionMs: 9,
+            startupMs: 20,
+            warm: true,
+          };
+        },
+      },
+    });
+
+    const page = await SELF.fetch(`${BASE_URL}/runs/${runId}/tests/exact`, {
+      headers: { cookie: researcher.cookie },
+    });
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain('Script');
+    expect(html).toContain('script-stdout-v1');
+    expect(html).toContain('Standard input');
+    expect(html).toContain('Expected stdout');
+    expect(html).toContain('Recorded stdout');
+    expect(html).toContain('·');
+    expect(html).toContain('␍␊');
+    expect(html).toContain('&lt;b&gt;text&lt;/b&gt;');
+    expect(html).toContain('diagnostic');
+    expect(html).toContain('Pass');
+
+    const escapedPage = await SELF.fetch(`${BASE_URL}/runs/${runId}/tests/empty`, {
+      headers: { cookie: researcher.cookie },
+    });
+    const escapedHtml = await escapedPage.text();
+    expect(escapedHtml).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(escapedHtml).not.toContain('<script>alert(1)</script>');
+  });
+
+  it('distinguishes empty, unavailable, partial, and lossy output without relying on color alone', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createScriptAssignment(researcher, scriptConfig({
+      tests: [
+        { id: 'empty', stdin: '', expectedStdout: '' },
+        { id: 'lossy', stdin: '', expectedStdout: 'x' },
+        { id: 'unavailable', stdin: '', expectedStdout: 'x' },
+      ],
+    }));
+    const runId = await launch(researcher, version, SCRIPT_SOURCE);
+    await executeRun(env, runId, {
+      runner: {
+        async runTest(job) {
+          if (job.testId === 'unavailable') throw new Error('runner interrupted');
+          if (job.testId === 'lossy') {
+            return {
+              format: 'script',
+              outcome: 'completed',
+              actual: null,
+              stdout: 'x\ufffd',
+              stderr: '',
+              stdoutValid: false,
+              outputTruncated: true,
+              diagnostic: null,
+              executionMs: 6,
+              startupMs: 18,
+              warm: true,
+            };
+          }
+          return {
+            format: 'script',
+            outcome: 'completed',
+            actual: null,
+            stdout: '',
+            stderr: '',
+            stdoutValid: true,
+            outputTruncated: false,
+            diagnostic: null,
+            executionMs: 6,
+            startupMs: 18,
+            warm: true,
+          };
+        },
+      },
+    });
+
+    const emptyPage = await (await SELF.fetch(`${BASE_URL}/runs/${runId}/tests/empty`, {
+      headers: { cookie: researcher.cookie },
+    })).text();
+    expect(emptyPage).toContain('Standard output was empty');
+    expect(emptyPage).toContain('explicit empty string');
+
+    const unavailablePage = await (await SELF.fetch(`${BASE_URL}/runs/${runId}/tests/unavailable`, {
+      headers: { cookie: researcher.cookie },
+    })).text();
+    expect(unavailablePage).toContain('Infrastructure failure');
+    expect(unavailablePage).toContain('Standard output is unavailable');
+    expect(unavailablePage).toContain('(unavailable)');
+
+    const lossyPage = await (await SELF.fetch(`${BASE_URL}/runs/${runId}/tests/lossy`, {
+      headers: { cookie: researcher.cookie },
+    })).text();
+    expect(lossyPage).toContain('Execution error');
+    expect(lossyPage).toContain('lossy preview');
+    expect(lossyPage).toContain('not valid UTF-8');
+    expect(lossyPage).toContain('partial');
+  });
+
+  it('keeps the original script evidence after switching the assignment to a function', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createScriptAssignment(researcher);
+    const runId = await launch(researcher, version, SCRIPT_SOURCE);
+    await executeRun(env, runId, {
+      runner: {
+        async runTest() {
+          return {
+            format: 'script',
+            outcome: 'completed',
+            actual: null,
+            stdout: '3\n',
+            stderr: '',
+            stdoutValid: true,
+            outputTruncated: false,
+            diagnostic: null,
+            executionMs: 7,
+            startupMs: 19,
+            warm: false,
+          };
+        },
+      },
+    });
+
+    await postJson(`/api/assignments/${version.assignmentId}/versions`, {
+      baseVersionId: version.id,
+      config: assignmentConfig({ title: 'Now a function' }),
+    }, researcher);
+
+    const page = await SELF.fetch(`${BASE_URL}/runs/${runId}/tests/two-values`, {
+      headers: { cookie: researcher.cookie },
+    });
+    const html = await page.text();
+    expect(html).toContain('script-stdout-v1');
+    expect(html).toContain('1\n2\n');
+    expect(html).toContain('3\n');
+    expect(html).toContain('Pass');
+    expect(html).not.toContain('Positional arguments');
   });
 });

@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   COMPARISON_RULE,
+  SCRIPT_COMPARISON_RULE,
   compareConfigs,
   validateConfig,
   type RawConfig,
+  type RawTest,
 } from '../src/config';
+import { compareScriptStdout, normalizeScriptOutput } from '../src/script-output';
 
 function validRaw(overrides: Partial<RawConfig> = {}): RawConfig {
   return {
@@ -30,6 +33,9 @@ function expectValid(raw: RawConfig) {
   const result = validateConfig(raw);
   if (!result.ok) {
     throw new Error(`Expected valid config, got ${JSON.stringify(result.errors)}`);
+  }
+  if (result.config.format !== 'function') {
+    throw new Error('Expected a function config');
   }
   return result.config;
 }
@@ -308,5 +314,213 @@ describe('compareConfigs', () => {
     expect(
       compareConfigs(base, { ...base, tests: [base.tests[1]!, base.tests[0]!] }),
     ).toEqual({ metadata: false, rubric: false, tests: true });
+  });
+});
+
+function scriptRaw(overrides: Partial<RawConfig> = {}): RawConfig {
+  return {
+    title: 'Print a total',
+    description: 'Read integers from standard input and print their total.',
+    format: 'script',
+    criteria: [
+      {
+        id: 'r1',
+        description: 'Reads to EOF',
+        expectedBehavior: 'Reads every line from standard input.',
+      },
+    ],
+    tests: [
+      { id: 'one', stdin: '1\n2\n', expectedStdout: '3\n' },
+      { id: 'empty', stdin: '', expectedStdout: '' },
+    ],
+    ...overrides,
+  };
+}
+
+function expectValidScript(raw: RawConfig) {
+  const result = validateConfig(raw);
+  if (!result.ok) {
+    throw new Error(`Expected valid script config, got ${JSON.stringify(result.errors)}`);
+  }
+  if (result.config.format !== 'script') {
+    throw new Error('Expected a script config');
+  }
+  return result.config;
+}
+
+describe('script configuration', () => {
+  it('preserves script text exactly, including CRLF, blank lines, and trailing spaces', () => {
+    const stdin = '\r\n  first  \r\n\r\nlast';
+    const expectedStdout = '  answer  \r\n\r\n';
+    const config = expectValidScript(
+      scriptRaw({
+        tests: [{ id: 'exact', stdin, expectedStdout }],
+      }),
+    );
+
+    const test = config.tests[0]!;
+    expect(test.stdin).toBe(stdin);
+    expect(test.expectedStdout).toBe(expectedStdout);
+    expect(test.comparisonRule).toBe(SCRIPT_COMPARISON_RULE);
+    expect('entryPoint' in config).toBe(false);
+  });
+
+  it('allows explicit empty strings but rejects missing script fields', () => {
+    const empty = expectValidScript(scriptRaw());
+    expect(empty.tests[1]?.stdin).toBe('');
+    expect(empty.tests[1]?.expectedStdout).toBe('');
+
+    const missing = validateConfig(
+      scriptRaw({ tests: [{ id: 'missing' } as RawTest] }),
+    );
+    expect(missing.ok).toBe(false);
+    if (missing.ok) return;
+    expect(missing.errors.tests?.rows[0]?.stdin).toMatch(/standard input/i);
+    expect(missing.errors.tests?.rows[0]?.expectedStdout).toMatch(/expected stdout/i);
+  });
+
+  it('rejects duplicate script test IDs and fields over 16 KiB of UTF-8', () => {
+    const duplicate = validateConfig(
+      scriptRaw({
+        tests: [
+          { id: 'same', stdin: '', expectedStdout: '' },
+          { id: 'same', stdin: '', expectedStdout: '' },
+        ],
+      }),
+    );
+    expect(duplicate.ok).toBe(false);
+    if (!duplicate.ok) {
+      expect(duplicate.errors.tests?.rows[1]?.id).toMatch(/already used/i);
+    }
+
+    const atLimit = 'é'.repeat(8 * 1024);
+    expect(atLimit.length).toBeLessThan(16 * 1024);
+    expect(expectValidScript(scriptRaw({
+      tests: [{ id: 'at-limit', stdin: atLimit, expectedStdout: '' }],
+    })).tests[0]?.stdin).toBe(atLimit);
+
+    const overLimit = 'é'.repeat(8 * 1024 + 1);
+    const tooLarge = validateConfig(
+      scriptRaw({ tests: [{ id: 'large', stdin: overLimit, expectedStdout: '' }] }),
+    );
+    expect(tooLarge.ok).toBe(false);
+    if (!tooLarge.ok) {
+      expect(tooLarge.errors.tests?.rows[0]?.stdin).toMatch(/16 KiB/);
+    }
+  });
+
+  it('rejects text that cannot round-trip as UTF-8 and fields from the wrong variant', () => {
+    const withBom = expectValidScript(scriptRaw({
+      tests: [{ id: 'bom', stdin: '\ufefftext', expectedStdout: '\ufeff' }],
+    }));
+    expect(withBom.tests[0]?.stdin).toBe('\ufefftext');
+
+    const loneSurrogate = validateConfig(
+      scriptRaw({ tests: [{ id: 'bad', stdin: '\ud800', expectedStdout: '' }] }),
+    );
+    expect(loneSurrogate.ok).toBe(false);
+    if (!loneSurrogate.ok) {
+      expect(loneSurrogate.errors.tests?.rows[0]?.stdin).toMatch(/UTF-8/);
+    }
+
+    const scriptWithEntryPoint = validateConfig(
+      scriptRaw({ entryPoint: 'main' }),
+    );
+    expect(scriptWithEntryPoint.ok).toBe(false);
+    if (!scriptWithEntryPoint.ok) {
+      expect(scriptWithEntryPoint.errors.entryPoint).toMatch(/no entry point|script/i);
+    }
+
+    const scriptWithArguments = validateConfig(
+      scriptRaw({
+        tests: [{
+          id: 'mixed',
+          stdin: '',
+          expectedStdout: '',
+          arguments: '[]',
+        }],
+      }),
+    );
+    expect(scriptWithArguments.ok).toBe(false);
+    if (!scriptWithArguments.ok) {
+      expect(scriptWithArguments.errors.tests?.rows[0]?.arguments).toMatch(/Function assignment|Function format/i);
+    }
+
+    const functionWithScriptFields = validateConfig(
+      validRaw({
+        tests: [{
+          id: 'mixed',
+          arguments: '[]',
+          expectedReturn: '1',
+          stdin: 'x',
+        }],
+      }),
+    );
+    expect(functionWithScriptFields.ok).toBe(false);
+    if (!functionWithScriptFields.ok) {
+      expect(functionWithScriptFields.errors.tests?.rows[0]?.stdin).toMatch(/Script assignment|Script format/i);
+    }
+  });
+
+  it('defaults omitted format to function and keeps function requests working', () => {
+    const config = expectValid(validRaw({ format: undefined, entryPoint: 'first_positive' }));
+    expect(config.format).toBe('function');
+    if (config.format === 'function') {
+      expect(config.entryPoint).toBe('first_positive');
+    }
+  });
+
+  it('treats a format switch and equivalent-looking expectations as a new test suite', () => {
+    const functionConfig = expectValid(validRaw());
+    const scriptConfig = expectValidScript(scriptRaw({ criteria: functionConfig.criteria }));
+
+    expect(compareConfigs(functionConfig, scriptConfig)).toEqual({
+      metadata: true,
+      rubric: false,
+      tests: true,
+    });
+    expect(scriptConfig.tests[0]?.comparisonRule).not.toBe(COMPARISON_RULE);
+  });
+
+  it('treats exact script text as the no-op boundary', () => {
+    const baseScript = expectValidScript(scriptRaw());
+    const reformatted = expectValidScript(
+      scriptRaw({
+        tests: [
+          { id: 'one', stdin: '1\n2\n', expectedStdout: '3\n' },
+          { id: 'empty', stdin: '', expectedStdout: '' },
+        ],
+      }),
+    );
+    expect(compareConfigs(baseScript, reformatted)).toEqual({
+      metadata: false,
+      rubric: false,
+      tests: false,
+    });
+
+    const crlf = expectValidScript(
+      scriptRaw({
+        tests: [
+          { id: 'one', stdin: '1\r\n2\r\n', expectedStdout: '3\r\n' },
+          { id: 'empty', stdin: '', expectedStdout: '' },
+        ],
+      }),
+    );
+    expect(compareConfigs(baseScript, crlf).tests).toBe(true);
+  });
+});
+
+describe('script stdout comparison', () => {
+  it('normalizes CRLF and removes at most one final LF from both sides', () => {
+    expect(normalizeScriptOutput('7\r\n')).toBe('7');
+    expect(normalizeScriptOutput('7\n')).toBe('7');
+    expect(normalizeScriptOutput('7\n\n')).toBe('7\n');
+    expect(compareScriptStdout('7', '7\n')).toBe(true);
+    expect(compareScriptStdout('7\r\n', '7')).toBe(true);
+    expect(compareScriptStdout('7', '7 ')).toBe(false);
+    expect(compareScriptStdout('7', '7\n\n')).toBe(false);
+    expect(compareScriptStdout('7', 'Answer: 7')).toBe(false);
+    expect(compareScriptStdout('a\r\nb', 'a\nb')).toBe(true);
+    expect(compareScriptStdout('a\rb', 'a\rb')).toBe(true);
   });
 });

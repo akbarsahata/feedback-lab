@@ -1,8 +1,14 @@
-import { COMPARISON_RULE } from './config';
+import {
+  COMPARISON_RULE,
+  SCRIPT_COMPARISON_RULE,
+  type AssignmentFormat,
+  type ComparisonRule,
+} from './config';
 
 export const MAX_SOURCE_BYTES = 64 * 1024;
 export const PYTHON_RELEASE = '3.12.11';
-export const RUNNER_ARTIFACT = 'native-python-runner/1';
+export const RUNNER_ARTIFACT = 'native-python-runner/2';
+export const LEGACY_RUNNER_ARTIFACT = 'native-python-runner/1';
 
 export interface RunLimits {
   executionMs: number;
@@ -109,13 +115,17 @@ export async function createSubmissionRun(
             test_suite_version_id, comparison_rule, python_release, runner_artifact,
             limits_json, status, queued_at, created_by)
          SELECT ?, s.id, s.assignment_id, s.assignment_version_id, s.rubric_version_id,
-                s.test_suite_version_id, ?, ?, ?, ?, 'queued', ?, ?
+                s.test_suite_version_id,
+                CASE v.format WHEN 'script' THEN ? ELSE ? END,
+                ?, ?, ?, 'queued', ?, ?
          FROM submission_versions s
          JOIN assignments a ON a.id = s.assignment_id
+         JOIN assignment_versions v ON v.id = s.assignment_version_id
          WHERE s.id = ? AND a.active_version_id = s.assignment_version_id`,
       )
       .bind(
         runId,
+        SCRIPT_COMPARISON_RULE,
         COMPARISON_RULE,
         PYTHON_RELEASE,
         RUNNER_ARTIFACT,
@@ -155,11 +165,15 @@ export interface RunTestSummary {
 }
 
 export interface RunTestEvidence extends RunTestSummary {
-  argumentsJson: string;
-  expectedReturnJson: string;
+  format: AssignmentFormat;
+  argumentsJson: string | null;
+  expectedReturnJson: string | null;
+  stdin: string | null;
+  expectedStdout: string | null;
   actualJson: string | null;
-  stdout: string;
+  stdout: string | null;
   stderr: string;
+  stdoutLossy: boolean;
 }
 
 export interface TestRunDetail {
@@ -169,7 +183,8 @@ export interface TestRunDetail {
   assignmentVersionId: string;
   assignmentVersionNumber: number;
   title: string;
-  entryPoint: string;
+  format: AssignmentFormat;
+  entryPoint: string | null;
   rubricVersionId: string;
   testSuiteVersionId: string;
   comparisonRule: string;
@@ -192,7 +207,8 @@ interface RunRow {
   assignment_version_id: string;
   assignment_version_number: number;
   title: string;
-  entry_point: string;
+  format: AssignmentFormat;
+  entry_point: string | null;
   rubric_version_id: string;
   test_suite_version_id: string;
   comparison_rule: string;
@@ -223,8 +239,11 @@ interface ResultRow {
 interface EvidenceRow {
   test_id: string;
   position: number;
-  arguments_json: string;
-  expected_return_json: string;
+  format: AssignmentFormat;
+  arguments_json: string | null;
+  expected_return_json: string | null;
+  stdin: string | null;
+  expected_stdout: string | null;
   status: TestStatus;
   started_at: string | null;
   finished_at: string | null;
@@ -232,6 +251,7 @@ interface EvidenceRow {
   startup_ms: number | null;
   runner_warm: number | null;
   output_truncated: number;
+  stdout_lossy: number;
   diagnostic: string | null;
   actual_json: string | null;
   stdout: string | null;
@@ -242,8 +262,9 @@ export async function getTestRun(db: D1Database, runId: string): Promise<TestRun
   const run = await db
     .prepare(
       `SELECT r.id, r.submission_id, r.assignment_id, r.assignment_version_id,
-              v.version_number AS assignment_version_number, v.title, v.entry_point,
-              r.rubric_version_id, r.test_suite_version_id, r.comparison_rule,
+              v.version_number AS assignment_version_number, v.title, v.format,
+              v.entry_point, r.rubric_version_id, r.test_suite_version_id,
+              r.comparison_rule,
               r.python_release, r.runner_artifact, r.limits_json, r.status,
               r.queued_at, r.started_at, r.finished_at, r.incomplete_reason,
               s.source
@@ -277,6 +298,7 @@ export async function getTestRun(db: D1Database, runId: string): Promise<TestRun
     assignmentVersionId: run.assignment_version_id,
     assignmentVersionNumber: run.assignment_version_number,
     title: run.title,
+    format: run.format,
     entryPoint: run.entry_point,
     rubricVersionId: run.rubric_version_id,
     testSuiteVersionId: run.test_suite_version_id,
@@ -309,25 +331,64 @@ function warmFromRow(value: number | null): boolean | null {
   return value === null ? null : value === 1;
 }
 
-export interface TestExecutionInput {
-  argumentsJson: string;
-  expectedReturnJson: string;
+interface ExecutionInputRow {
+  format: AssignmentFormat;
+  arguments_json: string | null;
+  expected_return_json: string | null;
+  stdin: string | null;
+  expected_stdout: string | null;
+  comparison_rule: ComparisonRule;
 }
+
+export type TestExecutionInput =
+  | {
+      format: 'function';
+      comparisonRule: typeof COMPARISON_RULE;
+      argumentsJson: string;
+      expectedReturnJson: string;
+    }
+  | {
+      format: 'script';
+      comparisonRule: typeof SCRIPT_COMPARISON_RULE;
+      stdin: string;
+      expectedStdout: string;
+    };
 
 export async function getTestExecutionInput(
   db: D1Database,
   runId: string,
   testId: string,
 ): Promise<TestExecutionInput | null> {
-  return db
+  const row = await db
     .prepare(
-      `SELECT t.arguments_json AS argumentsJson, t.expected_return_json AS expectedReturnJson
+      `SELECT v.format AS format, t.arguments_json, t.expected_return_json,
+              t.stdin, t.expected_stdout, t.comparison_rule
        FROM test_runs r
+       JOIN assignment_versions v ON v.id = r.assignment_version_id
        JOIN tests t ON t.test_suite_version_id = r.test_suite_version_id
        WHERE r.id = ? AND t.test_id = ?`,
     )
     .bind(runId, testId)
-    .first<TestExecutionInput>();
+    .first<ExecutionInputRow>();
+  if (row === null) return null;
+  if (row.format === 'script') {
+    if (row.comparison_rule !== SCRIPT_COMPARISON_RULE || row.stdin === null
+      || row.expected_stdout === null) return null;
+    return {
+      format: 'script',
+      comparisonRule: row.comparison_rule,
+      stdin: row.stdin,
+      expectedStdout: row.expected_stdout,
+    };
+  }
+  if (row.comparison_rule !== COMPARISON_RULE || row.arguments_json === null
+    || row.expected_return_json === null) return null;
+  return {
+    format: 'function',
+    comparisonRule: row.comparison_rule,
+    argumentsJson: row.arguments_json,
+    expectedReturnJson: row.expected_return_json,
+  };
 }
 
 export async function getRunTestEvidence(
@@ -337,11 +398,13 @@ export async function getRunTestEvidence(
 ): Promise<RunTestEvidence | null> {
   const row = await db
     .prepare(
-      `SELECT t.test_id, t.position, t.arguments_json, t.expected_return_json,
+      `SELECT t.test_id, t.position, v.format AS format,
+              t.arguments_json, t.expected_return_json, t.stdin, t.expected_stdout,
               tr.status, tr.started_at, tr.finished_at, tr.execution_ms, tr.startup_ms,
-              tr.runner_warm, tr.output_truncated, tr.diagnostic,
+              tr.runner_warm, tr.output_truncated, tr.stdout_lossy, tr.diagnostic,
               tr.actual_json, tr.stdout, tr.stderr
        FROM test_runs r
+       JOIN assignment_versions v ON v.id = r.assignment_version_id
        JOIN tests t ON t.test_suite_version_id = r.test_suite_version_id
        JOIN test_results tr ON tr.run_id = r.id AND tr.test_id = t.test_id
        WHERE r.id = ? AND t.test_id = ?`,
@@ -352,8 +415,11 @@ export async function getRunTestEvidence(
   return {
     id: row.test_id,
     position: row.position,
+    format: row.format,
     argumentsJson: row.arguments_json,
     expectedReturnJson: row.expected_return_json,
+    stdin: row.stdin,
+    expectedStdout: row.expected_stdout,
     status: row.status,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
@@ -361,9 +427,10 @@ export async function getRunTestEvidence(
     startupMs: row.startup_ms,
     runnerWarm: warmFromRow(row.runner_warm),
     outputTruncated: row.output_truncated === 1,
+    stdoutLossy: row.stdout_lossy === 1,
     diagnostic: row.diagnostic,
     actualJson: row.actual_json,
-    stdout: row.stdout ?? '',
+    stdout: row.stdout,
     stderr: row.stderr ?? '',
   };
 }
@@ -453,8 +520,9 @@ export async function markTestRunning(
 export interface RecordedResult {
   status: Exclude<TestStatus, 'pending' | 'running' | 'not_run'>;
   actualJson: string | null;
-  stdout: string;
+  stdout: string | null;
   stderr: string;
+  stdoutLossy: boolean;
   outputTruncated: boolean;
   diagnostic: string | null;
   executionMs: number | null;
@@ -474,7 +542,7 @@ export async function recordTestResult(
       `UPDATE test_results
        SET status = ?, finished_at = ?, execution_ms = ?, startup_ms = ?,
            runner_warm = ?, actual_json = ?, stdout = ?, stderr = ?,
-           output_truncated = ?, diagnostic = ?
+           stdout_lossy = ?, output_truncated = ?, diagnostic = ?
        WHERE run_id = ? AND test_id = ? AND status = 'running'`,
     )
     .bind(
@@ -486,6 +554,7 @@ export async function recordTestResult(
       result.actualJson,
       result.stdout,
       result.stderr,
+      result.stdoutLossy ? 1 : 0,
       result.outputTruncated ? 1 : 0,
       result.diagnostic,
       runId,

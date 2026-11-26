@@ -1,13 +1,22 @@
 import type { RawConfig } from '../src/config';
 
+export interface SerializedTest {
+  id: string;
+  comparisonRule: string;
+  argumentsJson?: string;
+  expectedReturnJson?: string;
+  stdin?: string;
+  expectedStdout?: string;
+}
+
 export interface SerializedVersion {
   id: string;
   assignmentId: string;
   versionNumber: number;
   title: string;
   description: string;
-  format: 'function';
-  entryPoint: string;
+  format: 'function' | 'script';
+  entryPoint?: string;
   rubricVersionId: string;
   testSuiteVersionId: string;
   rubric: {
@@ -17,14 +26,7 @@ export interface SerializedVersion {
   testSuite: {
     versionId: string;
     comparisonRule: string;
-    tests: Array<{
-      id: string;
-      arguments: unknown;
-      argumentsJson: string;
-      expectedReturn: unknown;
-      expectedReturnJson: string;
-      comparisonRule: string;
-    }>;
+    tests: SerializedTest[];
   };
   createdAt: string;
   createdBy: { id: string; email: string };
@@ -56,20 +58,48 @@ export function assignmentConfig(overrides: Partial<RawConfig> = {}): RawConfig 
   };
 }
 
+export function scriptConfig(overrides: Partial<RawConfig> = {}): RawConfig {
+  return {
+    title: 'Add two numbers',
+    description:
+      'Read one integer per line from standard input and print their total.',
+    format: 'script',
+    criteria: [
+      {
+        id: 'r1',
+        description: 'Reads to EOF',
+        expectedBehavior: 'Reads every line instead of only the first.',
+      },
+    ],
+    tests: [
+      { id: 'two-values', stdin: '1\n2\n', expectedStdout: '3\n' },
+      { id: 'empty', stdin: '', expectedStdout: '' },
+    ],
+    ...overrides,
+  };
+}
+
 export function versionToRawConfig(version: SerializedVersion): RawConfig {
   return {
     title: version.title,
     description: version.description,
-    entryPoint: version.entryPoint,
+    format: version.format,
+    entryPoint: version.entryPoint ?? '',
     criteria: version.rubric.criteria.map((criterion) => ({
       id: criterion.id,
       description: criterion.description,
       expectedBehavior: criterion.expectedBehavior,
     })),
-    tests: version.testSuite.tests.map((test) => ({
-      id: test.id,
-      arguments: test.argumentsJson,
-      expectedReturn: test.expectedReturnJson,
-    })),
+    tests: version.format === 'function'
+      ? version.testSuite.tests.map((test) => ({
+          id: test.id,
+          arguments: test.argumentsJson ?? '',
+          expectedReturn: test.expectedReturnJson ?? '',
+        }))
+      : version.testSuite.tests.map((test) => ({
+          id: test.id,
+          stdin: test.stdin ?? '',
+          expectedStdout: test.expectedStdout ?? '',
+        })),
   };
 }

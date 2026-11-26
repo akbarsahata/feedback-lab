@@ -1,28 +1,29 @@
 # Feedback Lab
 
-Feedback Lab is the research platform for inspecting AI feedback on introductory Python assignments. The repository implements issue #1's **versioned function assignment configuration** and issue #2's **isolated function test runs**.
+Feedback Lab is the research platform for inspecting AI feedback on introductory Python assignments. The repository implements issue #1's **versioned assignment configuration**, issue #2's **isolated test runs**, and issue #3's **script assignments plus generated JSON API docs**.
 
-A pre-approved researcher can sign in, create a Python function assignment with an ordered rubric and ordered tests, revise it, and open any saved configuration read-only. Every save that changes content creates immutable versions. A save based on an older active version is rejected instead of overwriting a newer one.
+A pre-approved researcher can sign in, create a Python **function** or **script** assignment with an ordered rubric and ordered tests, revise it, and open any saved configuration read-only. Every save that changes content creates immutable versions. A save based on an older active version is rejected instead of overwriting a newer one. A format switch creates a new assignment version and a new single-format test suite; existing runs keep their original format, source, expectations, and results.
 
 A researcher can also upload one synthetic UTF-8 Python file, launch the assignment's tests, and reopen line-numbered source and per-test evidence. A **Test run** pins the submission, assignment, rubric, test suite, Python release, runner artifact, and limits. Later edits do not change saved results.
 
-Script assignments, paired datasets, feedback generation, same-run study resume, aggregate reporting, seeded library data, drafts, restore/branching, and automatic merging are intentionally out of scope.
+Paired datasets, feedback generation, same-run study resume, aggregate reporting, seeded library data, drafts, restore/branching, and automatic merging are intentionally out of scope.
 
 ## Stack
 
 - Cloudflare Workers with server-rendered HTML
 - D1 for storage and sessions
-- TypeScript, no runtime npm dependencies
+- TypeScript, Zod 4, and `zod-openapi` 6 for runtime request/response validation and the OpenAPI 3.1 contract
+- Pinned `swagger-ui-dist` assets served same-origin under the researcher guard
 - Vitest running inside the Workers runtime via `@cloudflare/vitest-plugin`
 - Wrangler for local development and deployment
 
 ## Requirements
 
-- Node.js **22.12 or newer** (`.nvmrc` pins 22.14.0)
+- Node.js **22.14 or newer** (`.nvmrc` pins 22.14.0 and `engines` matches it)
 - npm
 - A Cloudflare account with D1 access for remote deployment
 
-The original environment had Node 20, but the current Wrangler and Vitest releases require Node 22.12+. Use `nvm use` in the repository.
+Use `nvm use` in the repository. `zod-openapi` 6 requires Node 22.14 or newer.
 
 ## Local setup
 
@@ -76,36 +77,50 @@ This is prototype authentication. Account-level controls, password reset, MFA, a
 
 ## Versioning model
 
-An **Assignment** has a stable ID and points to one active **Assignment version**. Each assignment version stores the title, task description, function format, entry point, and exact references to an immutable **Rubric version** and **Test suite version**. Rubric criteria and tests preserve order and content in their snapshot tables.
+An **Assignment** has a stable ID and points to one active **Assignment version**. Each assignment version stores the title, task description, format, the function entry point for function assignments, and exact references to an immutable **Rubric version** and **Test suite version**. Rubric criteria and tests preserve order and content in their snapshot tables. A suite is single-format: function tests carry `argumentsJson`/`expectedReturnJson`; script tests carry `stdin`/`expectedStdout`.
 
 | Save | New versions |
 | --- | --- |
 | Create an assignment | Assignment, Rubric, and Test suite |
-| Change only title, description, or entry point | Assignment only; reuse both referenced versions |
+| Change only title, description, or function entry point | Assignment only; reuse both referenced versions |
 | Change only the rubric | Assignment and Rubric; reuse the Test suite version |
 | Change only the tests | Assignment and Test suite; reuse the Rubric version |
+| Switch Function ↔ Script | Assignment and Test suite; reuse an unchanged rubric. Every test must be configured for the new format. |
 | Change both rubric and tests | Assignment, Rubric, and Test suite |
 | Save unchanged content | None |
 
 Writes are atomic D1 batches. An `AFTER INSERT ON assignment_versions` trigger makes the newly inserted version active, so a failed batch cannot half-activate a version. `UNIQUE (assignment_id, version_number)` is the optimistic-concurrency guard: two researchers editing the same base produce exactly one new version, and the batch rolls back any child snapshots from the losing write.
 
-No-op comparison uses validated values, not raw JSON text: object key order and whitespace do not create a version, while item order, content, or typed values do (including changing `1` to `1.0`). Snapshot tables are never updated or deleted. Exact-version lookup never falls back to the active version. History reads the versions and their active marker in one query.
+No-op comparison uses validated values, not raw JSON text for function tests: object key order and whitespace do not create a version, while item order, content, or typed values do (including changing `1` to `1.0`). Script `stdin` and `expectedStdout` are compared exactly, including CRLF, blank lines, and trailing spaces; an expectation that normalizes to the same output still creates a new suite. Snapshot tables are never updated or deleted. Exact-version lookup never falls back to the active version. History reads the versions and their active marker in one query.
 
 ## Configuration rules
 
 - A nonblank title and task description are required.
-- The entry point is a Unicode Python identifier such as `first_positive` or `café`, not a signature. It is saved under its NFKC-normalized spelling, which must not be a reserved keyword; soft keywords such as `match`, `case`, and `type` are allowed.
+- Choose **Function** or **Script**. `format` may be omitted in JSON requests for backward compatibility, which means `function`.
+- A function assignment requires a Unicode Python identifier entry point such as `first_positive` or `café`, not a signature. It is saved under its NFKC-normalized spelling, which must not be a reserved keyword; soft keywords such as `match`, `case`, and `type` are allowed.
+- A script assignment has no entry point and must not send one.
 - At least one rubric criterion and one test are required.
 - Criterion and test IDs use lowercase letters, digits, hyphens, or underscores, are unique within their list, and may repeat across lists.
 - Lists are ordered. IDs of existing items should be kept when revising; a changed ID is a remove plus an add from the versioning point of view.
+- Do not mix formats inside one suite. A function test sends arguments/expected return; a script test sends `stdin`/`expectedStdout`. Fields from the other format are rejected rather than ignored.
+
+### Function tests
+
 - Arguments are a JSON array: `[]` means no arguments, `[4, -1]` means two positional arguments, and `[[4, -1]]` means one list argument.
 - The expected return is a separate JSON value. Explicit `null` means Python `None`; a blank field is missing and rejected.
 - Supported values are integers, finite floating-point numbers, strings, booleans, `null`, and nested arrays/objects with string keys. Empty containers are supported.
 - Malformed JSON, duplicate object keys, non-array argument lists, non-finite numbers, and integers that cannot be represented exactly as binary64 are rejected. For example, `9007199254740992` is accepted but `9007199254740993` is not. Integer tokens are kept in exact decimal form. Tokens with a decimal point or exponent are finite binary64 floats (for example, `1e20`); the saved JSON retains the float kind and the sign of `-0.0`.
-- Stored arguments and expected returns are canonical JSON: object keys sort lexically (including numeric-looking keys), and arrays keep their order. The comparison rule is fixed to `function-value-v1`.
-- To bound save and editor work, use at most 100 nonblank rows per list and 64 nested JSON arrays/objects per value. The saved text and compact JSON together may use up to 1 MiB in UTF-8; this leaves room under [D1's 2 MB per-row and per-string limit](https://developers.cloudflare.com/d1/platform/limits/). Display spacing and other input formatting do not count toward this size.
+- Stored arguments and expected returns are canonical JSON: object keys sort lexically (including numeric-looking keys), and arrays keep their order. The comparison rule is `function-value-v1`.
 
-Validation errors are returned per field and per row. Successful saves create versions; failed, stale, and unchanged saves do not advance the active version. The HTML form keeps submitted input on validation and conflict responses.
+### Script tests
+
+- `stdin` is the complete standard input text. `expectedStdout` is the complete expected standard output. An explicit empty string is valid; an omitted API field is an error.
+- Script text is saved exactly. Leading blank lines and trailing spaces are preserved. The JSON API accepts literal CRLF. The editor preserves an existing field's exact text when it is left unchanged and saves new browser textarea line breaks as LF.
+- Each input and expected stdout field is limited to 16 KiB of UTF-8. Strings that cannot round-trip as UTF-8 (lone surrogates) are rejected. The comparison rule is `script-stdout-v1`.
+
+To bound save and editor work, use at most 100 nonblank rows per list and 64 nested JSON arrays/objects per function value. The saved text and compact JSON together may use up to 1 MiB in UTF-8; this leaves room under [D1's 2 MB per-row and per-string limit](https://developers.cloudflare.com/d1/platform/limits/). Display spacing and other input formatting do not count toward this size.
+
+Validation errors are returned per field and per row. Successful saves create versions; failed, stale, and unchanged saves do not advance the active version. The HTML form keeps submitted input on validation and conflict responses, including leading blank lines, trailing spaces, and empty script fields.
 
 ## Routes
 
@@ -116,72 +131,27 @@ HTML:
 | `GET /sign-in`, `POST /sign-in` | Sign in. |
 | `POST /sign-out` | Sign out (CSRF required). |
 | `GET /assignments` | Library, including the empty state. |
-| `GET /assignments/new`, `POST /assignments` | Create a function assignment. |
+| `GET /assignments/new`, `POST /assignments` | Create a function or script assignment. |
 | `GET /assignments/:id` | Active version. |
 | `GET /assignments/:id/edit`, `POST /assignments/:id` | Revise from the active version. Detail-page Edit links pin the version that was viewed; if it has changed, explicitly reopen the active version. POST requires the original `baseVersionId`. |
 | `GET /assignments/:id/history` | Saved versions, newest first. |
 | `GET /assignments/:id/versions/:versionId` | Exact version, read-only. |
 | `POST /assignments/:id/runs` | Upload one UTF-8 `.py` file (64 KiB maximum) and launch a run against the active version. Stale version IDs return 409. |
 | `GET /runs/:id` | Version-pinned run summary and line-numbered submitted source. |
-| `GET /runs/:id/tests/:testId` | Recorded expected and actual values, separate stdout/stderr, diagnostics, and timings for one test. |
+| `GET /runs/:id/tests/:testId` | Recorded expected/actual values, script stdin/stdout, separate stdout/stderr, diagnostics, and timings for one test. |
 
-JSON API (researcher role required except `/api/session`; writes require `X-CSRF-Token` and a matching `Origin` when present):
+## JSON API and generated docs
 
-| Route | Purpose |
-| --- | --- |
-| `GET /api/session` | Signed-in identity and CSRF token, or `{"authenticated":false}`. |
-| `GET /api/assignments` | Library summaries with active title and rubric/test counts. |
-| `POST /api/assignments` | Create; body `{"config": {...}}` or a bare config object. |
-| `GET /api/assignments/:id` | Active version. |
-| `GET /api/assignments/:id/versions` | Version summaries, newest first. |
-| `GET /api/assignments/:id/versions/:versionId` | Exact version; 404 rather than falling back. |
-| `POST /api/assignments/:id/versions` | Revise with `{"baseVersionId": "...", "config": {...}}`. |
+Zod 4 schemas validate JSON requests and responses at runtime and drive the generated contract via `zod-openapi` 6. Assignment validation also enforces constraints such as UTF-8 byte sizes and unique IDs. A response that fails validation returns a generic `500`.
 
-Revise responses: `201` with `changed: true` for a new version, `200` with `changed: false` for a no-op, and `409` `{"error":"stale_version","currentVersionId":"..."}` for a stale base. Validation returns `400` / `422` with the field errors. Signed-out is 401; a member is 403.
+- [Swagger UI](https://python-assessor.akbarsahata.id/api/docs) (`GET /api/docs`) — requires researcher access. Try it out is enabled for GET only; write operations show request examples and require the session cookie plus `X-CSRF-Token`.
+- [OpenAPI 3.1 document](https://python-assessor.akbarsahata.id/api/openapi.json) (`GET /api/openapi.json`) — requires researcher access.
 
-For create and revise, send the test arguments and expected return as **JSON text strings** in `arguments` and `expectedReturn` (for example, `"arguments": "[1.0]"`). The `argumentsJson` and `expectedReturnJson` string fields take precedence when present, so test rows from a read response can be posted back unchanged. Do not submit only decoded values: a caller's own JSON parser may already have erased the integer/float distinction, and it cannot report duplicate keys after parsing them.
+The OpenAPI document covers `/api/session` and the existing assignment read, create, revise, history, and exact-version operations. The hand-maintained endpoint and payload tables that used to live here were removed in issue #3.
 
-### Configuration handoff
+**Breaking response change:** function test responses now contain only `argumentsJson` and `expectedReturnJson`, not the decoded `arguments` and `expectedReturn` fields. The JSON text fields remain authoritative for Python numeric kinds, duplicate-key detection, and exact round-tripping through this API. Script tests use explicit `format: "script"`, `stdin`, and `expectedStdout`; function creates may still omit `format`. Requests may use a wrapped `{"config": {...}}` body or a bare config object, and `*Json` fields take precedence over their JSON-text aliases.
 
-`GET /api/assignments/:id/versions/:versionId` returns the exact immutable configuration, for example:
-
-```json
-{
-  "version": {
-    "id": "assignment-version-uuid",
-    "assignmentId": "assignment-uuid",
-    "versionNumber": 1,
-    "format": "function",
-    "entryPoint": "first_positive",
-    "rubricVersionId": "rubric-version-uuid",
-    "testSuiteVersionId": "test-suite-version-uuid",
-    "rubric": {
-      "versionId": "rubric-version-uuid",
-      "criteria": [
-        { "id": "r1", "description": "...", "expectedBehavior": "..." }
-      ]
-    },
-    "testSuite": {
-      "versionId": "test-suite-version-uuid",
-      "comparisonRule": "function-value-v1",
-      "tests": [
-        {
-          "id": "t1",
-          "arguments": [[4, -1]],
-          "argumentsJson": "[[4,-1]]",
-          "expectedReturn": 4,
-          "expectedReturnJson": "4",
-          "comparisonRule": "function-value-v1"
-        }
-      ]
-    },
-    "createdAt": "2026-11-25T00:00:00.000Z",
-    "createdBy": { "id": "user-uuid", "email": "researcher@example.test" }
-  }
-}
-```
-
-`arguments` and `expectedReturn` are JSON values emitted with the original numeric kind preserved on the wire. Some clients (including ordinary JavaScript JSON parsing) lose that distinction. **`argumentsJson` and `expectedReturnJson` are authoritative**: use lossless decoding of those strings, and use `entryPoint` as the canonical NFKC function name. A run pins the assignment, rubric, and test-suite version IDs it read and never resolves "latest" at result time.
+Signed-out JSON callers receive `401 {"error":"unauthenticated"}`; a signed-in member receives `403 {"error":"forbidden"}`. Revise returns `201` with `changed: true`, `200` with `changed: false` for a no-op, or `409` for a stale base. Validation details are shown in Swagger UI and the generated schema.
 
 ## Test runs
 
@@ -189,13 +159,24 @@ Each test runs in a fresh native Python execution with standard library only. Th
 
 `function-value-v1` compares exact numbers without tolerance (`7` matches `7.0`), strict booleans (`True` differs from `1`), exact strings, `None` only with `null`, ordered lists, and dictionaries by key recursively. The actual value is tagged by the trusted runner so Python integer and float kinds never pass through JavaScript `Number`.
 
+`script-stdout-v1` executes the uploaded file as `__main__` in a fresh child process per test. The complete configured UTF-8 `stdin` is written byte-for-byte without trimming or an appended newline, then closed so the program can read to EOF. Stdout and stderr are captured separately. Comparison happens only after normal completion: on both expected and actual stdout, CRLF becomes LF and at most one final LF is removed, then the text must match exactly. For expected `7`, both `7` and `7\n` pass while `7 `, `7\n\n`, and `Answer: 7` mismatch. Stderr is not compared but counts toward the shared 16 KiB cap. Empty stdout is stored as `""`; unavailable or partial output is distinct. Invalid UTF-8 stdout is an **Execution error** with a bounded lossy preview that is never compared; a confirmed resource limit takes precedence over interpreting output. Saved evidence is never rewritten by comparison.
+
 The native runner lives in [`runner/`](runner/README.md), and its private Container Worker adapter lives in [`runner-worker/`](runner-worker). The Worker publishes committed runs through `feedback-lab-test-runs`; the queue consumer calls the private `RUNNER` service binding. Each **Test run** gets its own container instance, so state from one run cannot affect another. Within a run, each test still executes in a fresh Python child process.
 
-The deployed runner uses the `basic` instance (0.25 vCPU, 1024 MiB), Python `3.12.11`, `enableInternet: false`, and the per-test limits above. The hosted verification record is in [`docs/verification/issue-2-hosted-runner.md`](docs/verification/issue-2-hosted-runner.md). Local tests use a fake runner and the Python contract tests; the hosted record is the evidence for the deployed boundary.
+The deployed runner uses the `basic` instance (0.25 vCPU, 1024 MiB), Python `3.12.11`, `enableInternet: false`, and the per-test limits above. The hosted issue #2 baseline is in [`docs/verification/issue-2-hosted-runner.md`](docs/verification/issue-2-hosted-runner.md); the issue #3 record in [`docs/verification/issue-3-hosted-runner.md`](docs/verification/issue-3-hosted-runner.md) distinguishes local checks from hosted verification that is still pending. Local tests use a fake runner and the Python contract tests; a local or fake-runner pass does not close a hosted gate.
 
 ## Deployment
 
 Production uses the `feedback-lab` Worker and D1 database at <https://python-assessor.akbarsahata.id>. Cloudflare manages DNS and TLS through the Worker Custom Domain. The `workers.dev` hostname and preview URLs are disabled.
+
+The app now ships pinned Swagger UI assets from `public/` through the `ASSETS` binding. `/api/docs` and `/api/docs/*` use `run_worker_first`, so the researcher guard runs before any docs asset. If the assets change, run `npm install` and copy the pinned files from `node_modules/swagger-ui-dist` into `public/api/docs/`; do not load Swagger UI from a CDN.
+
+For a format migration, deploy in this order so queued runs are never routed to an incompatible artifact:
+
+1. Pause new launches and drain queued/running work on its pinned artifact. Then deploy the private runner Worker/image.
+2. Apply D1 migration `0003_script_assignments.sql`. It preserves IDs, source bytes, and evidence and is readable by the previous function-only app.
+3. Deploy the app Worker with the new JSON contract, editor, and generated docs.
+4. Complete the hosted checklist below.
 
 For an initial deployment, authenticate Wrangler and select the Cloudflare account that owns `akbarsahata.id`. Then:
 
@@ -212,6 +193,8 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
 6. `npm run deploy`.
 7. Complete the hosted checklist below.
 
+Rollback: drain all queued and running protocol 2 runs first, then roll the app back to the function-only release, then roll the runner back. The old runner does not accept protocol 2 function or script jobs, and the old app cannot launch script runs. The function-only app can still read and write function data against schema 0003; script assignments remain stored but are not editable in the old UI. Do not reverse migration 0003 and do not delete script data written in the new format.
+
 ### Local verification performed
 
 - `npm test` (all unit and Workers-runtime integration tests) passes.
@@ -221,7 +204,8 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
 - Local headless Chrome exercised sign-in, repeated editor row add/remove, multiline JSON, save, reopen, and an unchanged resubmit.
 - Local Workers-runtime tests verify that anonymous sign-in is throttled without replacing or blocking an existing session.
 - `npm test` also covers `function-value-v1`, exact-version launch rejection, 64 KiB upload bounds, source byte preservation including a UTF-8 BOM, typed evidence, continuation after failures, duplicate delivery, late-result rejection, reconciliation, and access to run pages.
-- `python3 -m unittest discover -s runner -p 'test_*.py'` covers the native runner contract, including timeout with child processes, output caps, invalid UTF-8 output, recursion, unsupported and cyclic returns, and the 1 MiB return budget. The memory-limit case runs on Linux only.
+- Issue #3 coverage includes script configuration and 16 KiB/UTF-8 validation, exact stdin/expected-stdout preservation, format switches with old evidence retained, the stdout comparison matrix, invalid UTF-8 and resource-limit precedence, the old-migration D1 fixture with `foreign_key_check`, generated request/response schema checks, and researcher-only `/api/docs`, `/api/openapi.json`, and pinned assets.
+- `python3 -m unittest discover -s runner -p 'test_*.py'` covers the native runner contract, including timeout with child processes, output caps, invalid UTF-8 output, recursion, unsupported and cyclic returns, the 1 MiB return budget, script `__main__` execution, byte-exact stdin through EOF, empty input/output, CRLF preservation, nonzero exit, legacy protocol 1 jobs, and the private HTTP endpoint. The memory-limit case runs on Linux only.
 
 ### Hosted verification checklist
 
@@ -241,13 +225,21 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
 - [x] Restore the runner and confirm a new known-good run succeeds without changing the interrupted run.
 - [x] Confirm cold and warm runner timing are shown separately from execution time.
 - [x] Reopen a saved run after editing the assignment and confirm its source, expected values, and results still resolve to the original versions.
+- [ ] Apply migration 0003 to a copy of production data; confirm `PRAGMA foreign_key_check` is empty, row counts and IDs are unchanged, and an old function run still opens.
+- [ ] Create a script assignment with explicit empty input/output and with CRLF text; confirm the saved values and a no-op resave.
+- [ ] Switch a function assignment to script, then reopen the earlier run; confirm the original format, source, arguments, expected return, and results.
+- [ ] On the deployed runner, demonstrate script `__main__`, stdin to EOF, expected `7` matching `7\n`, empty output, an extra-space mismatch, a nonzero exit, and output truncation. Confirm the shared 2 s / 128 MiB / 16 KiB limits still apply.
+- [ ] Open `/api/docs` as a researcher and run a GET with Try it out; confirm POST Try it out is unavailable. Confirm signed-out users and members cannot fetch the docs page, spec, or assets.
+- [ ] Record the deployed revision, runner artifact, Python release, limits, and observed results in `docs/verification/issue-3-hosted-runner.md`. Local tests alone do not close issue #3.
 
 ## Implementation notes and deviations
 
 - The research environment had no `cf` binary or Cloudflare login. The app uses `wrangler.jsonc` and Wrangler's Vitest integration, as documented in the local architecture notes.
-- Node.js 22.12+ is required by the installed Wrangler/Vitest releases; Node 20 cannot run Wrangler 4.168.
-- `@cloudflare/workers-types` is a dev dependency for editor/type-check support. It is not a runtime dependency.
-- Stored JSON is canonical (`[[4,-1]]`); the edit form and detail view add spacing for display (`[[4, -1]]`) without changing values or numeric kinds. The edit form uses multiline JSON inputs so pasted formatting is kept on validation and conflict responses.
+- Node.js 22.14+ is required by the installed Wrangler, Vitest, Zod, and `zod-openapi` releases; Node 20 cannot run Wrangler 4.168, and `.nvmrc` pins 22.14.0.
+- `@cloudflare/workers-types` is a dev dependency for editor/type-check support. Zod, `zod-openapi`, and `swagger-ui-dist` are runtime/pinned docs dependencies.
+- Stored function JSON is canonical (`[[4,-1]]`); the edit form and detail view add spacing for display (`[[4, -1]]`) without changing values or numeric kinds. Function responses no longer include decoded `arguments`/`expectedReturn`; use the JSON text fields. The edit form uses multiline JSON inputs so pasted formatting is kept on validation and conflict responses.
+- Script text is stored exactly. The detail and evidence views show the raw text plus a whitespace view that marks spaces, tabs, CRLF, and blank lines; this is display-only.
+- Migration `0003_script_assignments.sql` rebuilds the cyclic assignment/run graph through parallel tables before renaming them. This avoids the D1 behavior where dropping a referenced parent can leave deferred foreign-key state even after a same-named replacement exists. The migration fixture applies only `0001`/`0002`, seeds function evidence and a newer active version, then applies `0003` and checks IDs, counts, and `foreign_key_check`.
 - Tests use a small cleanup helper between cases because the installed Workers Vitest plugin did not isolate D1 storage between tests automatically. Production migrations never seed data.
 
 ## Project layout
@@ -256,9 +248,12 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
 src/
   app.ts          router and sign-in/sign-out
   api.ts          JSON API for assignments and versions
+  api-schemas.ts  Zod request/response schemas and generated OpenAPI document
+  validated-response.ts outgoing JSON schema guard and generic 500
+  docs.ts         researcher-guarded /api/docs and /api/openapi.json
   auth.ts         D1 sessions, cookies, CSRF
-  config.ts       configuration validation and no-op comparison
-  editor-script.ts browser behavior for repeatable editor rows
+  config.ts       function/script validation and no-op comparison
+  editor-script.ts browser behavior for repeatable rows and format switching
   forms.ts        HTML form row parsing
   guard.ts        researcher access guard
   html.ts         shared layout, styles, escaping
@@ -274,10 +269,12 @@ src/
   runner.ts       private runner job/result contract
   runs-web.ts     run summary and per-test evidence pages
   upload.ts       bounded UTF-8 source uploads
-migrations/       D1 schema (no seeds)
+migrations/       D1 schema (no seeds); 0003 rebuilds the assignment/run graph
+public/api/docs/  pinned same-origin Swagger UI assets from swagger-ui-dist 5.36.0
 runner/           native Python runner, harness, image, contract tests
 runner-worker/    private Container Worker adapter and per-run routing
 scripts/          maintainer provisioning
 test/             unit and Workers-runtime integration tests
 docs/adr/         architecture decisions
+docs/verification/ hosted and local verification records
 ```

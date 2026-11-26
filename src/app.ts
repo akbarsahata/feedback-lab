@@ -1,4 +1,7 @@
 import { handleAssignmentsApi } from './api';
+import { errorResponseSchema, sessionResponseSchema } from './api-schemas';
+import { handleApiDocs } from './docs';
+import { validatedJsonResponse } from './validated-response';
 import { executeRun } from './coordinator';
 import { reconcileRuns } from './runs';
 import { handleRunsHtml } from './runs-web';
@@ -15,7 +18,7 @@ import {
 } from './auth';
 import { formString } from './forms';
 import { messagePage, signInPage } from './html';
-import { htmlResponse, jsonResponse, localRedirectPath, methodNotAllowed, redirect } from './http';
+import { htmlResponse, localRedirectPath, methodNotAllowed, redirect } from './http';
 import { PASSWORD_ITERATIONS, PASSWORD_SCHEME, verifyPassword } from './password.mjs';
 
 const GENERIC_SIGN_IN_ERROR = 'Email or password is incorrect.';
@@ -31,7 +34,7 @@ export default {
       return await route(request, env);
     } catch (error) {
       console.error(error);
-      return jsonResponse({ error: 'internal_error' }, 500);
+      return validatedJsonResponse(errorResponseSchema, { error: 'internal_error' }, 500);
     }
   },
 
@@ -79,9 +82,9 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (path === '/api/session' && request.method === 'GET') {
     const session = await getSession(env.DB, request);
     if (session === null) {
-      return jsonResponse({ authenticated: false });
+      return validatedJsonResponse(sessionResponseSchema, { authenticated: false });
     }
-    return jsonResponse({
+    return validatedJsonResponse(sessionResponseSchema, {
       authenticated: true,
       user: { id: session.id, email: session.email, role: session.role },
       csrfToken: session.csrfToken,
@@ -91,6 +94,9 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (path === '/') {
     return redirect('/assignments');
   }
+
+  const docsResponse = await handleApiDocs(request, env, path);
+  if (docsResponse !== null) return docsResponse;
 
   const htmlResponseForAssignments = await handleAssignmentsHtml(request, env, path);
   if (htmlResponseForAssignments !== null) {
@@ -177,7 +183,7 @@ async function signOut(request: Request, env: Env): Promise<Response> {
 
 async function notFound(request: Request, session: SessionUser | null): Promise<Response> {
   if (new URL(request.url).pathname.startsWith('/api/')) {
-    return jsonResponse({ error: 'not_found' }, 404);
+    return validatedJsonResponse(errorResponseSchema, { error: 'not_found' }, 404);
   }
   return htmlResponse(
     messagePage({

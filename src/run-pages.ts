@@ -3,12 +3,14 @@ import { escapeHtml, shell } from './html';
 import { formatJsonForDisplay, parseJsonValue } from './json';
 import type { RunTestEvidence, TestRunDetail } from './runs';
 import {
+  describeOutput,
   formatActualJson,
   formatLimits,
   runStatusClass,
   runStatusLabel,
   testStatusClass,
   testStatusLabel,
+  visibleWhitespace,
 } from './run-format';
 import { formatTimestamp } from './pages';
 
@@ -43,7 +45,7 @@ export function runPage(
   const body = `<div class="head">
   <div>
     <h1>Test run ${escapeHtml(run.id.slice(0, 8))}</h1>
-    <p class="muted">${escapeHtml(run.title)} · version ${run.assignmentVersionNumber} · queued ${escapeHtml(formatTimestamp(run.queuedAt))}</p>
+    <p class="muted">${escapeHtml(run.title)} · ${run.format === 'script' ? 'Script' : 'Function'} assignment · version ${run.assignmentVersionNumber} · queued ${escapeHtml(formatTimestamp(run.queuedAt))}</p>
   </div>
   <div class="actions">
     <a class="button" href="/assignments/${escapeHtml(run.assignmentId)}/versions/${escapeHtml(run.assignmentVersionId)}">Assignment version</a>
@@ -88,9 +90,43 @@ ${evidence === null ? '' : evidencePanel(run, evidence)}`;
 }
 
 function evidencePanel(run: TestRunDetail, evidence: RunTestEvidence): string {
-  const expected = safeDisplay(evidence.expectedReturnJson);
+  const expected = safeDisplay(evidence.expectedReturnJson ?? '');
   const actual =
     evidence.actualJson === null ? null : formatActualJson(evidence.actualJson);
+  const outputDescription = describeOutput(
+    evidence.stdout,
+    evidence.stdoutLossy,
+    evidence.outputTruncated,
+  );
+  const detail = evidence.format === 'script'
+    ? `<div class="fields">
+      <label>Standard input<textarea class="mono" rows="5" readonly>
+${escapeHtml(evidence.stdin ?? '')}</textarea></label>
+      <label>Expected stdout<textarea class="mono" rows="5" readonly>
+${escapeHtml(evidence.expectedStdout ?? '')}</textarea></label>
+      <label>Recorded stdout${evidence.stdoutLossy ? ' (lossy preview)' : ''}${evidence.outputTruncated ? ' (partial)' : ''}<textarea class="mono" rows="5" readonly>
+${escapeHtml(evidence.stdout ?? '')}</textarea></label>
+      <label>Standard error${evidence.outputTruncated ? ' (partial or truncated)' : ''}<textarea class="mono" rows="5" readonly>
+${escapeHtml(evidence.stderr)}</textarea></label>
+    </div>
+    <div class="fields">
+      <label>Standard input with visible whitespace<pre class="code">${escapeHtml(visibleWhitespace(evidence.stdin ?? ''))}</pre></label>
+      <label>Expected stdout with visible whitespace<pre class="code">${escapeHtml(visibleWhitespace(evidence.expectedStdout ?? ''))}</pre></label>
+      <label>Recorded stdout with visible whitespace<pre class="code">${escapeHtml(
+        evidence.stdout === null ? '(unavailable)' : visibleWhitespace(evidence.stdout),
+      )}</pre></label>
+      <label>Timing<input readonly value="${escapeHtml(timing(evidence))}"></label>
+    </div>`
+    : `<div class="fields">
+      <label>Positional arguments<textarea class="mono" rows="3" readonly>${escapeHtml(safeDisplay(evidence.argumentsJson ?? ''))}</textarea></label>
+      <label>Expected return<textarea class="mono" rows="3" readonly>${escapeHtml(expected)}</textarea></label>
+      <label>Actual return<textarea class="mono" rows="3" readonly>${escapeHtml(actual ?? 'No actual value recorded')}</textarea></label>
+      <label>Timing<input readonly value="${escapeHtml(timing(evidence))}"></label>
+    </div>
+    <div class="fields">
+      <label>Standard output${evidence.outputTruncated ? ' (partial or truncated)' : ''}<textarea class="mono" rows="5" readonly>${escapeHtml(evidence.stdout ?? '')}</textarea></label>
+      <label>Standard error${evidence.outputTruncated ? ' (partial or truncated)' : ''}<textarea class="mono" rows="5" readonly>${escapeHtml(evidence.stderr)}</textarea></label>
+    </div>`;
   return `<section class="panel end" id="test-${escapeHtml(evidence.id)}">
   <div class="panel-top">
     <h2>Test <code>${escapeHtml(evidence.id)}</code></h2>
@@ -98,16 +134,10 @@ function evidencePanel(run: TestRunDetail, evidence: RunTestEvidence): string {
   </div>
   <div class="pad stack">
     ${evidence.diagnostic === null ? '' : `<div class="alert alert-error" role="alert">${escapeHtml(evidence.diagnostic)}</div>`}
-    <div class="fields">
-      <label>Positional arguments<textarea class="mono" rows="3" readonly>${escapeHtml(safeDisplay(evidence.argumentsJson))}</textarea></label>
-      <label>Expected return<textarea class="mono" rows="3" readonly>${escapeHtml(expected)}</textarea></label>
-      <label>Actual return<textarea class="mono" rows="3" readonly>${escapeHtml(actual ?? 'No actual value recorded')}</textarea></label>
-      <label>Timing<input readonly value="${escapeHtml(timing(evidence))}"></label>
-    </div>
-    <div class="fields">
-      <label>Standard output${evidence.outputTruncated ? ' (partial or truncated)' : ''}<textarea class="mono" rows="5" readonly>${escapeHtml(evidence.stdout)}</textarea></label>
-      <label>Standard error${evidence.outputTruncated ? ' (partial or truncated)' : ''}<textarea class="mono" rows="5" readonly>${escapeHtml(evidence.stderr)}</textarea></label>
-    </div>
+    ${detail}
+    <p class="hint">${escapeHtml(outputDescription)}${evidence.format === 'script' && evidence.stdout === ''
+      ? ' The saved stdout is an explicit empty string.'
+      : ''}</p>
     <p class="hint">Return value, printed output, and diagnostics are recorded separately. Reopen this run to compare it with <a href="/assignments/${escapeHtml(run.assignmentId)}/versions/${escapeHtml(run.assignmentVersionId)}">the exact assignment version</a>.</p>
   </div>
 </section>`;

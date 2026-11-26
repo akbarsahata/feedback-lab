@@ -1,4 +1,42 @@
-// The browser only manages row names and order, never edits entered values.
+export const formatSwitchScript = String.raw`
+(() => {
+  const form = document.getElementById('assignment-form');
+  if (!form) return;
+  const select = form.querySelector('select[name="format"]');
+  const testTemplate = document.getElementById('tests-template');
+  const warning = document.getElementById('format-switch-warning');
+  if (!select) return;
+  const update = () => {
+    const format = select.value;
+    for (const root of [form, testTemplate.content]) {
+      root.querySelectorAll('[data-format-field]').forEach((field) => {
+        field.classList.toggle('is-hidden', field.dataset.formatField !== format);
+      });
+    }
+    document.querySelectorAll('[data-format-note]').forEach((note) => {
+      note.hidden = note.dataset.formatNote !== format;
+    });
+    const entryPoint = form.querySelector('input[name="entryPoint"]');
+    if (entryPoint) entryPoint.required = format === 'function';
+    if (warning) warning.hidden = format === form.dataset.initialFormat;
+  };
+  select.addEventListener('change', update);
+  form.addEventListener('formdata', ({ formData }) => {
+    if (select.value !== 'script') return;
+    form.querySelectorAll('textarea[data-exact-text]').forEach((field) => {
+      // Forms convert line breaks to CRLF. JSON-encode the text for transport,
+      // and retain the original bytes when the browser-normalized value is unchanged.
+      const name = field.name.replace(/\]$/, 'Text]');
+      const text = field.value === field.defaultValue
+        ? field.dataset.exactText
+        : JSON.stringify(field.value);
+      formData.delete(field.name);
+      formData.set(name, text);
+    });
+  });
+  update();
+})();`;
+
 export const repeatableRowsScript = String.raw`
 (() => {
   const renumber = (container) => {

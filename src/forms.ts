@@ -1,4 +1,4 @@
-import type { RawConfig, RawCriterion, RawTest } from './config';
+import type { AssignmentFormat, RawConfig, RawCriterion, RawTest } from './config';
 
 export interface ParsedAssignmentForm {
   raw: RawConfig;
@@ -14,6 +14,9 @@ const ROW_FIELD_PATTERN = /^(criteria|tests)\[(\d+)\]\[([A-Za-z]+)\]$/;
 export function parseAssignmentForm(form: FormData): ParsedAssignmentForm {
   const criteria = new Map<string, MutableRow>();
   const tests = new Map<string, MutableRow>();
+  const format: AssignmentFormat = formString(form, 'format') === 'script'
+    ? 'script'
+    : 'function';
 
   for (const [name, value] of form.entries()) {
     if (typeof value !== 'string') {
@@ -39,7 +42,8 @@ export function parseAssignmentForm(form: FormData): ParsedAssignmentForm {
     raw: {
       title: formString(form, 'title'),
       description: formString(form, 'description'),
-      entryPoint: formString(form, 'entryPoint'),
+      format,
+      entryPoint: format === 'script' ? '' : formString(form, 'entryPoint'),
       criteria: sortedRows(criteria).map(
         (row): RawCriterion => ({
           id: row.id ?? '',
@@ -48,16 +52,32 @@ export function parseAssignmentForm(form: FormData): ParsedAssignmentForm {
         }),
       ),
       tests: sortedRows(tests).map(
-        (row): RawTest => ({
-          id: row.id ?? '',
-          arguments: row.arguments ?? '',
-          expectedReturn: row.expectedReturn ?? '',
-        }),
+        (row): RawTest => format === 'script'
+          ? {
+              id: row.id ?? '',
+              stdin: readExactText(row.stdinText, row.stdin),
+              expectedStdout: readExactText(row.expectedStdoutText, row.expectedStdout),
+            }
+          : {
+              id: row.id ?? '',
+              arguments: row.arguments ?? '',
+              expectedReturn: row.expectedReturn ?? '',
+            },
       ),
     },
     csrfToken: formString(form, '_csrf'),
     baseVersionId: formString(form, 'baseVersionId'),
   };
+}
+
+function readExactText(encoded: string | undefined, plain: string | undefined): string | undefined {
+  if (encoded === undefined) return plain ?? '';
+  try {
+    const text: unknown = JSON.parse(encoded);
+    return typeof text === 'string' ? text : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function sortedRows(rows: Map<string, MutableRow>): MutableRow[] {

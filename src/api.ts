@@ -4,13 +4,23 @@ import {
 } from './auth';
 import {
   COMPARISON_RULE,
+  SCRIPT_COMPARISON_RULE,
   validateConfig,
-  type RawConfig,
-  type RawCriterion,
-  type RawTest,
+  type ConfigErrors,
 } from './config';
 import { requireResearcher } from './guard';
-import { jsonResponse, jsonTextResponse } from './http';
+import {
+  assignmentsResponseSchema,
+  configRequestSchema,
+  errorResponseSchema,
+  reviseRequestSchema,
+  validationErrorResponseSchema,
+  versionResponseSchema,
+  versionsResponseSchema,
+  wrappedCreateRequestSchema,
+} from './api-schemas';
+import { validatedJsonResponse } from './validated-response';
+import type { z } from 'zod';
 import {
   AssignmentNotFoundError,
   createAssignment,
@@ -24,6 +34,11 @@ import {
 } from './repository';
 
 class InvalidRequestError extends Error {}
+class InvalidConfigError extends Error {
+  constructor(readonly errors: ConfigErrors) {
+    super('Invalid assignment configuration.');
+  }
+}
 
 export async function handleAssignmentsApi(
   request: Request,
@@ -37,9 +52,18 @@ export async function handleAssignmentsApi(
   try {
     return await routeAssignmentsApi(request, env, path, guarded.session);
   } catch (error) {
-    if (error instanceof AssignmentNotFoundError) return jsonResponse({ error: 'not_found' }, 404);
+    if (error instanceof AssignmentNotFoundError) {
+      return validatedJsonResponse(errorResponseSchema, { error: 'not_found' }, 404);
+    }
     if (error instanceof InvalidRequestError) {
-      return jsonResponse({ error: 'invalid_request', message: error.message }, 400);
+      return validatedJsonResponse(
+        errorResponseSchema,
+        { error: 'invalid_request', message: error.message },
+        400,
+      );
+    }
+    if (error instanceof InvalidConfigError) {
+      return invalidConfigResponse(error.errors);
     }
     throw error;
   }
@@ -53,24 +77,40 @@ async function routeAssignmentsApi(
 ): Promise<Response> {
   if (path === '/api/assignments') {
     if (request.method === 'GET') {
-      return jsonResponse({ assignments: await listAssignments(env.DB) });
+      return validatedJsonResponse(
+        assignmentsResponseSchema,
+        { assignments: await listAssignments(env.DB) },
+      );
     }
     if (request.method === 'POST') {
       return createHandler(request, env, session);
     }
-    return jsonResponse({ error: 'method_not_allowed' }, 405, { allow: 'GET, POST' });
+    return validatedJsonResponse(
+      errorResponseSchema,
+      { error: 'method_not_allowed' },
+      405,
+      { allow: 'GET, POST' },
+    );
   }
 
   const versionsMatch = /^\/api\/assignments\/([^/]+)\/versions$/.exec(path);
   if (versionsMatch !== null) {
     const assignmentId = versionsMatch[1] as string;
     if (request.method === 'GET') {
-      return jsonResponse({ versions: await listVersions(env.DB, assignmentId) });
+      return validatedJsonResponse(
+        versionsResponseSchema,
+        { versions: await listVersions(env.DB, assignmentId) },
+      );
     }
     if (request.method === 'POST') {
       return reviseHandler(request, env, session, assignmentId);
     }
-    return jsonResponse({ error: 'method_not_allowed' }, 405, { allow: 'GET, POST' });
+    return validatedJsonResponse(
+      errorResponseSchema,
+      { error: 'method_not_allowed' },
+      405,
+      { allow: 'GET, POST' },
+    );
   }
 
   const versionMatch = /^\/api\/assignments\/([^/]+)\/versions\/([^/]+)$/.exec(path);
@@ -90,10 +130,15 @@ async function routeAssignmentsApi(
     versionMatch !== null ||
     assignmentMatch !== null
   ) {
-    return jsonResponse({ error: 'method_not_allowed' }, 405, { allow: 'GET' });
+    return validatedJsonResponse(
+      errorResponseSchema,
+      { error: 'method_not_allowed' },
+      405,
+      { allow: 'GET' },
+    );
   }
 
-  return jsonResponse({ error: 'not_found' }, 404);
+  return validatedJsonResponse(errorResponseSchema, { error: 'not_found' }, 404);
 }
 
 async function createHandler(
@@ -106,10 +151,13 @@ async function createHandler(
     return writeError;
   }
 
-  const config = readConfig(configValue(await readJsonObject(request)));
+  const body = await readJsonObject(request);
+  const config = Object.hasOwn(body, 'config')
+    ? parseRequest(wrappedCreateRequestSchema, body).config
+    : parseRequest(configRequestSchema, body);
   const validation = validateConfig(config);
   if (!validation.ok) {
-    return jsonResponse({ error: 'validation_failed', errors: validation.errors }, 400);
+    return invalidConfigResponse(validation.errors);
   }
 
   const version = await createAssignment(env.DB, validation.config, session.id);
@@ -127,15 +175,11 @@ async function reviseHandler(
     return writeError;
   }
 
-  const body = await readJsonObject(request);
-  const baseVersionId = body.baseVersionId;
-  if (typeof baseVersionId !== 'string' || baseVersionId.trim() === '') {
-    throw new InvalidRequestError('baseVersionId is required.');
-  }
+  const { baseVersionId, config } = parseRequest(reviseRequestSchema, await readJsonObject(request));
 
-  const validation = validateConfig(readConfig(configValue(body)));
+  const validation = validateConfig(config);
   if (!validation.ok) {
-    return jsonResponse({ error: 'validation_failed', errors: validation.errors }, 400);
+    return invalidConfigResponse(validation.errors);
   }
 
   try {
@@ -149,7 +193,8 @@ async function reviseHandler(
     return versionResponse(result.version, result.changed);
   } catch (error) {
     if (error instanceof StaleVersionError) {
-      return jsonResponse(
+      return validatedJsonResponse(
+        errorResponseSchema,
         { error: 'stale_version', currentVersionId: error.currentVersionId },
         409,
       );
@@ -158,13 +203,39 @@ async function reviseHandler(
   }
 }
 
-function checkWriteRequest(request: Request, session: SessionUser): Response | null {
-  const error = authenticatedPostError(request, session, request.headers.get('x-csrf-token'));
-  return error === null ? null : jsonResponse({ error }, 403);
+function parseRequest<S extends z.ZodType>(schema: S, body: Record<string, unknown>): z.output<S> {
+  const parsed = schema.safeParse(body);
+  if (parsed.success) return parsed.data;
+
+  const scriptFields: Record<number, Record<string, string>> = {};
+  for (const issue of parsed.error.issues) {
+    const path = issue.path[0] === 'config' ? issue.path.slice(1) : issue.path;
+    const [group, row, field] = path;
+    if (group === 'tests' && typeof row === 'number' &&
+      (field === 'stdin' || field === 'expectedStdout')) {
+      const label = field === 'stdin' ? 'Standard input' : 'Expected stdout';
+      (scriptFields[row] ??= {})[field] = `${label} must be a string. Send an empty string when blank.`;
+    }
+  }
+  if (Object.keys(scriptFields).length > 0) {
+    throw new InvalidConfigError({ tests: { rows: scriptFields } });
+  }
+  const issue = parsed.error.issues[0];
+  const path = issue?.path.length ? issue.path.join('.') : 'body';
+  throw new InvalidRequestError(`${path}: ${issue?.message ?? 'Invalid request body.'}`);
 }
 
-function configValue(body: Record<string, unknown>): unknown {
-  return Object.hasOwn(body, 'config') ? body.config : body;
+function invalidConfigResponse(errors: ConfigErrors): Response {
+  return validatedJsonResponse(
+    validationErrorResponseSchema,
+    { error: 'validation_failed', errors },
+    400,
+  );
+}
+
+function checkWriteRequest(request: Request, session: SessionUser): Response | null {
+  const error = authenticatedPostError(request, session, request.headers.get('x-csrf-token'));
+  return error === null ? null : validatedJsonResponse(errorResponseSchema, { error }, 403);
 }
 
 async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
@@ -180,95 +251,37 @@ async function readJsonObject(request: Request): Promise<Record<string, unknown>
   return value as Record<string, unknown>;
 }
 
-function readConfig(value: unknown): RawConfig {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new InvalidRequestError('config must be a JSON object.');
-  }
-  const input = value as Record<string, unknown>;
-
-  const criteriaValue = input.criteria ?? [];
-  const testsValue = input.tests ?? [];
-  if (!Array.isArray(criteriaValue)) {
-    throw new InvalidRequestError('config.criteria must be an array.');
-  }
-  if (!Array.isArray(testsValue)) {
-    throw new InvalidRequestError('config.tests must be an array.');
-  }
-
-  return {
-    title: readString(input.title, 'config.title'),
-    description: readString(input.description, 'config.description'),
-    entryPoint: readString(input.entryPoint, 'config.entryPoint'),
-    criteria: criteriaValue.map((row, index) => readCriterion(row, index)),
-    tests: testsValue.map((row, index) => readTest(row, index)),
-  };
-}
-
-function readCriterion(value: unknown, index: number): RawCriterion {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new InvalidRequestError(`config.criteria[${index}] must be an object.`);
-  }
-  const row = value as Record<string, unknown>;
-  return {
-    id: readString(row.id, `config.criteria[${index}].id`),
-    description: readString(row.description, `config.criteria[${index}].description`),
-    expectedBehavior: readString(
-      row.expectedBehavior,
-      `config.criteria[${index}].expectedBehavior`,
-    ),
-  };
-}
-
-function readTest(value: unknown, index: number): RawTest {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new InvalidRequestError(`config.tests[${index}] must be an object.`);
-  }
-  const row = value as Record<string, unknown>;
-  const prefix = `config.tests[${index}]`;
-  const text = (key: 'arguments' | 'expectedReturn') => {
-    const canonical = `${key}Json`;
-    return Object.hasOwn(row, canonical)
-      ? readString(row[canonical], `${prefix}.${canonical}`)
-      : readString(row[key], `${prefix}.${key}`);
-  };
-  return {
-    id: readString(row.id, `${prefix}.id`),
-    arguments: text('arguments'),
-    expectedReturn: text('expectedReturn'),
-  };
-}
-
-function readString(value: unknown, field: string): string {
-  if (value === undefined || value === null) {
-    return '';
-  }
-  if (typeof value !== 'string') {
-    throw new InvalidRequestError(`${field} must be a string.`);
-  }
-  return value;
-}
-
 function versionResponse(version: AssignmentVersionDetail, changed?: boolean): Response {
   const { criteria, tests, ...metadata } = version;
-  const head = JSON.stringify({
-    ...metadata,
-    rubric: {
-      versionId: version.rubricVersionId,
-      criteria,
+  const suiteTests = tests.map((test) => test.comparisonRule === COMPARISON_RULE
+    ? {
+        id: test.id,
+        argumentsJson: test.argumentsJson,
+        expectedReturnJson: test.expectedReturnJson,
+        comparisonRule: test.comparisonRule,
+      }
+    : {
+        id: test.id,
+        stdin: test.stdin,
+        expectedStdout: test.expectedStdout,
+        comparisonRule: test.comparisonRule,
+      });
+  const body = {
+    ...(changed === undefined ? {} : { changed }),
+    version: {
+      ...metadata,
+      rubric: {
+        versionId: version.rubricVersionId,
+        criteria,
+      },
+      testSuite: {
+        versionId: version.testSuiteVersionId,
+        comparisonRule: version.format === 'script'
+          ? SCRIPT_COMPARISON_RULE
+          : COMPARISON_RULE,
+        tests: suiteTests,
+      },
     },
-  }).slice(0, -1);
-  const suite = JSON.stringify({
-    versionId: version.testSuiteVersionId,
-    comparisonRule: COMPARISON_RULE,
-  }).slice(0, -1);
-  // Only the validated, stored JSON values go on the wire verbatim. Parsing
-  // them as JS numbers before serializing would erase Python's numeric kinds.
-  const rows = tests.map((test) =>
-    `${JSON.stringify(test).slice(0, -1)},"arguments":${test.argumentsJson},"expectedReturn":${test.expectedReturnJson}}`,
-  ).join(',');
-  const writeResult = changed === undefined ? '' : `"changed":${changed},`;
-  return jsonTextResponse(
-    `{${writeResult}"version":${head},"testSuite":${suite},"tests":[${rows}]}}}`,
-    changed ? 201 : 200,
-  );
+  };
+  return validatedJsonResponse(versionResponseSchema, body, changed ? 201 : 200);
 }

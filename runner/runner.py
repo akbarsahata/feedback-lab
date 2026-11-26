@@ -28,8 +28,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-PROTOCOL = 1
-RUNNER_ARTIFACT = "native-python-runner/1"
+PROTOCOL = 2
+LEGACY_PROTOCOL = 1
+RUNNER_ARTIFACT = "native-python-runner/2"
+LEGACY_RUNNER_ARTIFACT = "native-python-runner/1"
 STARTED_AT = time.monotonic()
 MAX_SOURCE_BYTES = 64 * 1024
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
@@ -45,25 +47,43 @@ class JobError(ValueError):
 def validate_job(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise JobError("job must be an object")
-    if raw.get("protocol") != PROTOCOL:
+    protocol = raw.get("protocol")
+    if protocol not in (PROTOCOL, LEGACY_PROTOCOL):
         raise JobError("unsupported protocol")
-    for field in ("runId", "testId", "entryPoint", "source", "argumentsJson",
-                  "pythonRelease", "runnerArtifact"):
+    expected_artifact = RUNNER_ARTIFACT if protocol == PROTOCOL else LEGACY_RUNNER_ARTIFACT
+    for field in ("runId", "testId", "source", "pythonRelease", "runnerArtifact"):
         if not isinstance(raw.get(field), str) or raw[field] == "":
             raise JobError(f"{field} must be a non-empty string")
-    if raw["runnerArtifact"] != RUNNER_ARTIFACT:
+    if raw["runnerArtifact"] != expected_artifact:
         raise JobError("runnerArtifact does not match this runner")
     if raw["pythonRelease"] != platform.python_version():
         raise JobError("pythonRelease does not match this runner")
+    format = raw.get("format", "function")
+    if protocol == PROTOCOL and format not in ("function", "script"):
+        raise JobError("format must be function or script")
+    if format == "script":
+        if protocol != PROTOCOL:
+            raise JobError("script jobs require protocol 2")
+        if not isinstance(raw.get("stdin"), str):
+            raise JobError("stdin must be a string")
+        for field in ("entryPoint", "argumentsJson"):
+            if field in raw:
+                raise JobError(f"{field} must not be present for a script job")
+    else:
+        for field in ("entryPoint", "argumentsJson"):
+            if not isinstance(raw.get(field), str) or raw[field] == "":
+                raise JobError(f"{field} must be a non-empty string")
+        if "stdin" in raw:
+            raise JobError("stdin must not be present for a function job")
+        try:
+            arguments = json.loads(raw["argumentsJson"])
+        except json.JSONDecodeError as error:
+            raise JobError(f"argumentsJson is not valid JSON: {error}") from error
+        if not isinstance(arguments, list):
+            raise JobError("argumentsJson must encode a JSON array")
     source = raw["source"]
     if len(source.encode("utf-8")) > MAX_SOURCE_BYTES:
         raise JobError("source exceeds the 64 KiB limit")
-    try:
-        arguments = json.loads(raw["argumentsJson"])
-    except json.JSONDecodeError as error:
-        raise JobError(f"argumentsJson is not valid JSON: {error}") from error
-    if not isinstance(arguments, list):
-        raise JobError("argumentsJson must encode a JSON array")
     limits = raw.get("limits")
     if not isinstance(limits, dict):
         raise JobError("limits must be an object")
@@ -87,16 +107,18 @@ def execute_job(job: dict[str, Any], warm: bool) -> dict[str, Any]:
         source_path = work_path / "submission.py"
         job_path = work_path / "job.json"
         source_path.write_text(job["source"], encoding="utf-8")
-        arguments = json.loads(job["argumentsJson"])
+        format = job.get("format", "function")
+        submission_job: dict[str, Any] = {
+            "format": format,
+            "sourcePath": str(source_path),
+        }
+        if format == "script":
+            submission_job["stdin"] = job["stdin"]
+        else:
+            submission_job["entryPoint"] = job["entryPoint"]
+            submission_job["arguments"] = json.loads(job["argumentsJson"])
         job_path.write_text(
-            json.dumps(
-                {
-                    "sourcePath": str(source_path),
-                    "entryPoint": job["entryPoint"],
-                    "arguments": arguments,
-                },
-                ensure_ascii=False,
-            ),
+            json.dumps(submission_job, ensure_ascii=False),
             encoding="utf-8",
         )
 
@@ -179,28 +201,42 @@ def finish_job(
         except (UnicodeDecodeError, json.JSONDecodeError):
             result = None
 
-    stdout, stderr, output_changed = cap_decoded_output(
-        captured["stdout"], captured["stderr"], limits["outputBytes"]
-    )
-    truncated = captured["truncated"] or output_changed
+    stdout_bytes = captured["stdout_bytes"]
+    stderr_bytes = captured["stderr_bytes"]
+    captured_bytes = len(stdout_bytes) + len(stderr_bytes)
+    stdout_valid = valid_utf8(stdout_bytes)
+    stderr_valid = valid_utf8(stderr_bytes)
+    stdout = stdout_bytes.decode("utf-8", "replace")
+    stderr = stderr_bytes.decode("utf-8", "replace")
+    is_script = job.get("format") == "script"
+    truncated = captured["truncated"]
+    if not is_script:
+        # Preserve the function protocol's preview budget, including for old jobs.
+        stdout, stderr, preview_trimmed = cap_decoded_output(stdout, stderr, limits["outputBytes"])
+        truncated = truncated or preview_trimmed
     common = {
-        "protocol": PROTOCOL,
+        "protocol": job["protocol"],
+        "format": job.get("format", "function"),
         "runId": job["runId"],
         "testId": job["testId"],
         "runnerArtifact": job["runnerArtifact"],
         "stdout": stdout,
         "stderr": stderr,
+        "stdoutValid": stdout_valid,
+        "stderrValid": stderr_valid,
         "outputTruncated": truncated,
         "executionMs": execution_ms,
         "warm": warm,
     }
+    if is_script:
+        common["capturedOutputBytes"] = captured_bytes
 
     if captured["output_limit"]:
         return common | {
             "outcome": "output_limit",
             "diagnostic": (
                 "The combined standard output and standard error reached the configured cap "
-                f"({len(stdout.encode('utf-8')) + len(stderr.encode('utf-8'))} bytes retained)."
+                f"({captured_bytes} bytes captured)."
             ),
         }
     if captured["timed_out"]:
@@ -209,7 +245,7 @@ def finish_job(
             "diagnostic": (
                 "The execution reached the configured time limit "
                 f"(peak memory {captured['peak_memory'] // (1024 * 1024)} MiB, "
-                f"{len(stdout.encode('utf-8')) + len(stderr.encode('utf-8'))} output bytes captured, "
+                f"{captured_bytes} output bytes captured, "
                 f"{captured['leftover']} leftover processes{leftover_detail(captured['leftover_pids'])})."
             ),
         }
@@ -238,7 +274,14 @@ def finish_job(
             "outcome": "execution_error",
             "diagnostic": bounded(str(result.get("diagnostic", "Execution failed."))),
         }
-    if result.get("outcome") != "completed" or "actual" not in result:
+    if result.get("outcome") != "completed":
+        return common | {
+            "outcome": "execution_error",
+            "diagnostic": "The execution returned an unusable result.",
+        }
+    if is_script:
+        return common | {"outcome": "completed"}
+    if "actual" not in result:
         return common | {
             "outcome": "execution_error",
             "diagnostic": "The execution returned an unusable result.",
@@ -364,10 +407,10 @@ def capture(
         except OSError:
             pass
     return {
-        "stdout": bytes(buffers[process.stdout]).decode("utf-8", "replace")
-        if process.stdout in buffers else "",
-        "stderr": bytes(buffers[process.stderr]).decode("utf-8", "replace")
-        if process.stderr in buffers else "",
+        "stdout_bytes": bytes(buffers[process.stdout])
+        if process.stdout in buffers else b"",
+        "stderr_bytes": bytes(buffers[process.stderr])
+        if process.stderr in buffers else b"",
         "truncated": timed_out or output_limit or memory_limited,
         "timed_out": timed_out,
         "output_limit": output_limit,
@@ -392,6 +435,14 @@ def leftover_detail(pids: list[int]) -> str:
             comm, state = "?", "?"
         details.append(f"{pid}:{comm}:{state}")
     return f" ({', '.join(details)})"
+
+
+def valid_utf8(data: bytes) -> bool:
+    try:
+        data.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        return False
 
 
 def cap_decoded_output(stdout: str, stderr: str, limit: int) -> tuple[str, str, bool]:

@@ -29,6 +29,7 @@ th{background:#f8f9fb;color:var(--muted);font-size:12px;font-weight:750}tr:last-
 label{display:grid;gap:5px;min-width:0;font-weight:650}input,textarea{min-width:0;width:100%;padding:8px 10px;border:1px solid #bbc7d7;border-radius:6px;background:#fff;color:var(--ink)}
 textarea{min-height:88px;resize:vertical}textarea[rows="1"]{min-height:0}.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}.wide{grid-column:1/-1}
 .field{display:grid;gap:8px}.field-error{margin:0;color:var(--bad);font-size:12px;font-weight:600}
+.is-hidden{display:none!important}select{min-width:0;width:100%;padding:8px 10px;border:1px solid #bbc7d7;border-radius:6px;background:#fff;color:var(--ink);font:inherit}
 .alert{margin-bottom:16px;padding:11px 13px;border-radius:7px;border:1px solid var(--line);background:#fff;font-size:14px}
 .alert-error{border-color:#e6b4ba;background:var(--bad-bg);color:#7d1b27}.alert-warn{border-color:#eed398;background:var(--warn-bg);color:#68440e}
 .alert-ok{border-color:#b9dccb;background:var(--ok-bg);color:var(--ok)}
@@ -112,7 +113,7 @@ export function shell({ title, user, body }: ShellOptions): string {
   </header>
   <main class="wrap">
     ${body}
-    <div class="footnote">Feedback Lab prototype · function assignments only in this release.</div>
+    <div class="footnote">Feedback Lab prototype · function and script assignments in this release.</div>
   </main>
 </div>
 </div>`);

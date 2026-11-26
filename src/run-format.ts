@@ -82,3 +82,47 @@ function formatActual(value: ActualValue): string {
 export function formatLimits(limits: { executionMs: number; memoryMiB: number; outputBytes: number }): string {
   return `${limits.executionMs / 1000} s · ${limits.memoryMiB} MiB · ${limits.outputBytes / 1024} KiB output`;
 }
+
+export function formatScript(text: string): string {
+  return text === '' ? '(empty string)' : text;
+}
+
+/**
+ * Renders text with every space, tab, and line ending visible so trailing
+ * spaces, blank lines, and CRLF differences can be inspected without changing
+ * the saved evidence.
+ */
+export function visibleWhitespace(text: string): string {
+  if (text === '') return '(empty string)';
+  let rendered = '';
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]!;
+    if (character === '\r' && text[index + 1] === '\n') {
+      rendered += '\u240d\u240a\n';
+      index += 1;
+    } else if (character === '\r') {
+      rendered += '\u240d\n';
+    } else if (character === '\n') {
+      rendered += '\u240a\n';
+    } else if (character === '\t') {
+      rendered += '\u2192';
+    } else if (character === ' ') {
+      rendered += '\u00b7';
+    } else {
+      rendered += character;
+    }
+  }
+  return rendered;
+}
+
+export function describeOutput(
+  stdout: string | null,
+  stdoutLossy: boolean,
+  outputTruncated: boolean,
+): string {
+  if (stdout === null) return 'Standard output is unavailable for this test.';
+  const parts = [stdout === '' ? 'Standard output was empty.' : 'Standard output was captured.'];
+  if (stdoutLossy) parts.push('The preview is lossy because stdout was not valid UTF-8.');
+  if (outputTruncated) parts.push('The captured output is partial or truncated.');
+  return parts.join(' ');
+}
