@@ -163,7 +163,7 @@ Each test runs in a fresh native Python execution with standard library only. Th
 
 The native runner lives in [`runner/`](runner/README.md), and its private Container Worker adapter lives in [`runner-worker/`](runner-worker). The Worker publishes committed runs through `feedback-lab-test-runs`; the queue consumer calls the private `RUNNER` service binding. Each **Test run** gets its own container instance, so state from one run cannot affect another. Within a run, each test still executes in a fresh Python child process.
 
-The deployed runner uses the `basic` instance (0.25 vCPU, 1024 MiB), Python `3.12.11`, `enableInternet: false`, and the per-test limits above. The hosted issue #2 baseline is in [`docs/verification/issue-2-hosted-runner.md`](docs/verification/issue-2-hosted-runner.md); the issue #3 record in [`docs/verification/issue-3-hosted-runner.md`](docs/verification/issue-3-hosted-runner.md) records the deployed versions and hosted checks, including the long-suite CPU limitation. Local tests use a fake runner and the Python contract tests; a local or fake-runner pass does not replace hosted evidence.
+The deployed runner uses the `basic` instance (0.25 vCPU, 1024 MiB), Python `3.12.11`, `enableInternet: false`, and the per-test limits above. The image precompiles the Python standard library at build time so each test does not recompile imports on the slow container. The hosted issue #2 baseline is in [`docs/verification/issue-2-hosted-runner.md`](docs/verification/issue-2-hosted-runner.md); the issue #3 record in [`docs/verification/issue-3-hosted-runner.md`](docs/verification/issue-3-hosted-runner.md) records the deployed versions and hosted checks, including the long-suite CPU limitation; [`docs/verification/issue-14-hosted-runner.md`](docs/verification/issue-14-hosted-runner.md) records the long-suite fix and slow-host checks. Local tests use a fake runner and the Python contract tests; a local or fake-runner pass does not replace hosted evidence.
 
 ## Deployment
 
@@ -264,7 +264,7 @@ src/
   upload.ts       bounded UTF-8 source uploads
 migrations/       D1 schema (no seeds); 0003 rebuilds the assignment/run graph
 public/api/docs/  pinned same-origin Swagger UI assets from swagger-ui-dist 5.36.0
-runner/           native Python runner, harness, image, contract tests
+runner/           native Python runner, image, contract tests
 runner-worker/    private Container Worker adapter and per-run routing
 scripts/          maintainer provisioning
 test/             unit and Workers-runtime integration tests

@@ -34,8 +34,10 @@ STARTED_AT = time.monotonic()
 MAX_SOURCE_BYTES = 64 * 1024
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_ACTUAL_BYTES = 1024 * 1024
+MAX_RESULT_BYTES = 2 * 1024 * 1024
 MAX_DEPTH = 64
 MAX_DIAGNOSTIC = 2000
+SUBMISSION_CHILD = Path(__file__).with_name("submission_child.py")
 
 
 class JobError(ValueError):
@@ -115,22 +117,13 @@ def execute_job(job: dict[str, Any], warm: bool) -> dict[str, Any]:
             json.dumps(submission_job, ensure_ascii=False),
             encoding="utf-8",
         )
-
-        result_file = tempfile.TemporaryFile()
-        result_fd = result_file.fileno()
-        os.set_inheritable(result_fd, True)
-        try:
-            return finish_job(job, limits, work, result_file, result_fd, warm)
-        finally:
-            result_file.close()
+        return finish_job(job, limits, work, warm)
 
 
 def finish_job(
     job: dict[str, Any],
     limits: dict[str, int],
     work: str,
-    result_file: Any,
-    result_fd: int,
     warm: bool,
 ) -> dict[str, Any]:
     job_path = Path(work) / "job.json"
@@ -144,31 +137,50 @@ def finish_job(
         "LC_ALL": "C.UTF-8",
         "LANG": "C.UTF-8",
     }
+    result_read, result_write = os.pipe()
+    is_script = job["format"] == "script"
+    stdin_read: int | None = None
+    stdin_write: int | None = None
+    if is_script:
+        stdin_read, stdin_write = os.pipe()
     command = [
         sys.executable,
         "-I",
         "-B",
-        str(Path(__file__).with_name("harness.py")),
+        str(SUBMISSION_CHILD),
         str(job_path),
-        str(result_fd),
+        str(result_write),
     ]
     # The execution clock starts after isolation setup and before any
-    # submission code can run.
+    # submission code can run. Trusted interpreter startup is part of the
+    # per-test wall-clock limit; the image precompiles bytecode to keep it
+    # small on the basic container.
     started = time.monotonic()
-    process = subprocess.Popen(
-        command,
-        cwd=work,
-        env=environment,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        pass_fds=(result_fd,),
-        start_new_session=True,
-        preexec_fn=lambda: apply_limits(limits),
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=work,
+            env=environment,
+            stdin=stdin_read if stdin_read is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            pass_fds=(result_write,),
+            start_new_session=True,
+            preexec_fn=lambda: apply_limits(limits),
+        )
+    except BaseException:
+        for fd in (result_read, result_write, stdin_read, stdin_write):
+            close_fd(fd)
+        raise
+    close_fd(result_write)
+    close_fd(stdin_read)
+    stdin_data = job["stdin"].encode("utf-8") if is_script else b""
     try:
         captured = capture(
             process,
+            result_fd=result_read,
+            stdin_fd=stdin_write,
+            stdin_data=stdin_data,
             execution_seconds=limits["executionMs"] / 1000,
             output_bytes=limits["outputBytes"],
             memory_bytes=limits["memoryMiB"] * 1024 * 1024,
@@ -183,13 +195,11 @@ def finish_job(
         except subprocess.TimeoutExpired:
             pass
     execution_ms = int((time.monotonic() - started) * 1000)
-    result_file.seek(0)
-    result_bytes = result_file.read(2 * 1024 * 1024)
 
     result: dict[str, Any] | None = None
-    if result_bytes:
+    if captured["result_bytes"]:
         try:
-            decoded = json.loads(result_bytes.decode("utf-8"))
+            decoded = json.loads(captured["result_bytes"].decode("utf-8"))
             if isinstance(decoded, dict):
                 result = decoded
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -202,7 +212,6 @@ def finish_job(
     stderr_valid = valid_utf8(stderr_bytes)
     stdout = stdout_bytes.decode("utf-8", "replace")
     stderr = stderr_bytes.decode("utf-8", "replace")
-    is_script = job.get("format") == "script"
     truncated = captured["truncated"]
     if not is_script:
         # Keep the existing function output preview budget.
@@ -248,12 +257,22 @@ def finish_job(
             "outcome": "memory_limit",
             "diagnostic": "The execution reached the configured memory limit.",
         }
+    if captured["result_error"] is not None:
+        return common | {
+            "outcome": "execution_error",
+            "diagnostic": captured["result_error"],
+        }
     if process.returncode != 0:
         return common | {
             "outcome": "execution_error",
             "diagnostic": f"The execution process exited with code {process.returncode}.",
         }
     if result is None:
+        if is_script:
+            # An abrupt os._exit(0) bypasses the envelope. A zero exit is not
+            # a submission-caused failure; the captured stdout is still
+            # evidence.
+            return common | {"outcome": "completed"}
         return common | {
             "outcome": "execution_error",
             "diagnostic": "The execution ended without a readable result.",
@@ -318,9 +337,21 @@ def set_limit(
         return
 
 
+def close_fd(fd: int | None) -> None:
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
 def capture(
     process: subprocess.Popen[bytes],
     *,
+    result_fd: int,
+    stdin_fd: int | None,
+    stdin_data: bytes,
     execution_seconds: float,
     output_bytes: int,
     memory_bytes: int,
@@ -332,18 +363,30 @@ def capture(
         selector.register(stream, selectors.EVENT_READ)
     buffers = {process.stdout: bytearray(), process.stderr: bytearray()}
     total = 0
+    result = bytearray()
+    result_error: str | None = None
+    open_streams = 2
+    stdin_view = memoryview(stdin_data) if stdin_fd is not None else None
+    os.set_blocking(result_fd, False)
+    selector.register(result_fd, selectors.EVENT_READ)
+    if stdin_fd is not None:
+        os.set_blocking(stdin_fd, False)
+        if stdin_view:
+            selector.register(stdin_fd, selectors.EVENT_WRITE)
+        else:
+            close_fd(stdin_fd)
+            stdin_fd = None
     deadline = time.monotonic() + execution_seconds
     timed_out = False
     output_limit = False
     memory_limited = False
     peak_memory = 0
-    open_streams = 2
     next_memory_check = 0.0
 
     # Keep observing until the whole process tree has exited and its output
     # pipes are closed. A submission can close its pipes and keep running; that
     # must still hit the wall-clock deadline.
-    while process.poll() is None or open_streams > 0:
+    while process.poll() is None or open_streams > 0 or result_fd is not None:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             timed_out = True
@@ -360,9 +403,50 @@ def capture(
             memory_limited = True
             kill_group(process)
             break
+        if process.poll() is not None and stdin_fd is not None:
+            selector.unregister(stdin_fd)
+            close_fd(stdin_fd)
+            stdin_fd = None
+            stdin_view = None
         events = selector.select(min(0.02, remaining))
         for key, _ in events:
             stream = key.fileobj
+            if stdin_fd is not None and stream == stdin_fd:
+                assert stdin_view is not None
+                try:
+                    written = os.write(stdin_fd, stdin_view[:65536])
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    written = 0
+                stdin_view = stdin_view[written:]
+                if written == 0 or not stdin_view:
+                    selector.unregister(stdin_fd)
+                    close_fd(stdin_fd)
+                    stdin_fd = None
+                    stdin_view = None
+                continue
+            if result_fd is not None and stream == result_fd:
+                try:
+                    chunk = os.read(result_fd, 8192)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    selector.unregister(result_fd)
+                    close_fd(result_fd)
+                    result_fd = None
+                    continue
+                result.extend(chunk)
+                if len(result) > MAX_RESULT_BYTES:
+                    result_error = (
+                        "The submission result exceeded the "
+                        f"{MAX_RESULT_BYTES // (1024 * 1024)} MiB envelope limit."
+                    )
+                    kill_group(process)
+                    break
+                continue
             try:
                 chunk = os.read(stream.fileno(), 8192)
             except BlockingIOError:
@@ -386,7 +470,7 @@ def capture(
                 output_limit = True
                 kill_group(process)
                 break
-        if output_limit:
+        if output_limit or result_error is not None:
             break
         if process.poll() is not None and not selector.get_map():
             break
@@ -402,23 +486,28 @@ def capture(
             process.wait()
     reap_orphans()
     selector.close()
+    close_fd(stdin_fd)
+    close_fd(result_fd)
     for stream in (process.stdout, process.stderr):
         try:
             stream.close()
         except OSError:
             pass
+    leftover_pids = process_group_members(process.pid)
     return {
         "stdout_bytes": bytes(buffers[process.stdout])
         if process.stdout in buffers else b"",
         "stderr_bytes": bytes(buffers[process.stderr])
         if process.stderr in buffers else b"",
-        "truncated": timed_out or output_limit or memory_limited,
+        "result_bytes": bytes(result),
+        "result_error": result_error,
+        "truncated": timed_out or output_limit or memory_limited or result_error is not None,
         "timed_out": timed_out,
         "output_limit": output_limit,
         "memory_limited": memory_limited,
         "peak_memory": peak_memory,
-        "leftover": len(process_group_members(process.pid)),
-        "leftover_pids": process_group_members(process.pid),
+        "leftover": len(leftover_pids),
+        "leftover_pids": leftover_pids,
     }
 
 
@@ -481,7 +570,7 @@ def kill_group(process: subprocess.Popen[bytes]) -> None:
             pass
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
-        # The direct harness may remain a zombie until wait(); zombies consume
+        # The direct child may remain a zombie until wait(); zombies consume
         # no CPU, so only live descendants extend the deadline.
         remaining = [
             pid

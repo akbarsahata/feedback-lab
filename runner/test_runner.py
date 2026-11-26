@@ -11,10 +11,13 @@ import platform
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import urllib.error
 import urllib.request
+from pathlib import Path
+from unittest import mock
 
 import runner
 
@@ -183,6 +186,27 @@ class RunnerContractTests(unittest.TestCase):
         with self.assertRaises(runner.JobError):
             runner.validate_job(bad)
 
+    def run_job_with_child(self, child_source: str, **kwargs) -> dict:
+        with tempfile.TemporaryDirectory() as temp:
+            child = Path(temp) / "fake_child.py"
+            child.write_text(child_source, encoding="utf-8")
+            with mock.patch.object(runner, "SUBMISSION_CHILD", child):
+                return self.run_job("def answer():\n    return None\n", **kwargs)
+
+    def test_an_oversized_result_envelope_is_an_execution_error(self) -> None:
+        result = self.run_job_with_child(
+            "import os, sys\n"
+            "result_fd = int(sys.argv[2])\n"
+            "data = b'x' * (2 * 1024 * 1024 + 1)\n"
+            "while data:\n"
+            "    written = os.write(result_fd, data[:65536])\n"
+            "    data = data[written:]\n"
+        )
+
+        self.assertEqual(result["outcome"], "execution_error")
+        self.assertIn("envelope limit", result["diagnostic"])
+        self.assertTrue(result["outputTruncated"])
+
 
 class ScriptRunnerContractTests(unittest.TestCase):
     def run_job(self, source: str, stdin: str = "", **kwargs) -> dict:
@@ -240,6 +264,25 @@ class ScriptRunnerContractTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "completed")
         self.assertEqual(result["stdout"], "first\n")
 
+    def test_stdin_larger_than_the_pipe_buffer_round_trips(self) -> None:
+        stdin = ("0123456789abcdef" * 16384) + "\n"
+        result = self.run_job(
+            "import sys\n"
+            "if __name__ == '__main__':\n"
+            "    sys.stdout.write(sys.stdin.read())\n",
+            stdin,
+            limits={**LIMITS, "outputBytes": 512 * 1024},
+        )
+        self.assertEqual(result["outcome"], "completed")
+        self.assertEqual(result["stdout"], stdin)
+        self.assertEqual(result["capturedOutputBytes"], len(stdin.encode("utf-8")))
+
+    def test_stdin_larger_than_the_pipe_buffer_may_be_ignored(self) -> None:
+        stdin = "x" * (256 * 1024)
+        result = self.run_job("print('done')\n", stdin)
+        self.assertEqual(result["outcome"], "completed")
+        self.assertEqual(result["stdout"], "done\n")
+
     def test_crlf_output_is_preserved_for_the_worker_to_compare(self) -> None:
         result = self.run_job(
             "import sys\n"
@@ -278,6 +321,16 @@ class ScriptRunnerContractTests(unittest.TestCase):
             "if __name__ == '__main__':\n"
             "    print('done')\n"
             "    sys.exit(0)\n",
+        )
+        self.assertEqual(result["outcome"], "completed")
+        self.assertEqual(result["stdout"], "done\n")
+
+    def test_zero_exit_without_a_result_envelope_is_normal_completion(self) -> None:
+        result = self.run_job(
+            "import os\n"
+            "if __name__ == '__main__':\n"
+            "    print('done', flush=True)\n"
+            "    os._exit(0)\n",
         )
         self.assertEqual(result["outcome"], "completed")
         self.assertEqual(result["stdout"], "done\n")

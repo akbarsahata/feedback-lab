@@ -97,6 +97,8 @@ Two single-run nine-test suites timed out on tests 7–9 on cold `basic` contain
 
 The timeout is a confirmed resource outcome and was recorded as such; it is not a script-comparison defect. To keep the closure evidence stable, the hosted matrix uses a six-test comparison run and a four-test evidence/continuation run. On the `basic` 0.25 vCPU instance, a long suite can still exceed the 2-second per-test limit under sustained CPU contention. A follow-up should evaluate a larger instance or further reduce per-test startup overhead before researchers rely on long script suites.
 
+**Resolved by issue #14.** The runner image now precompiles the standard library and runs each test in a single child process. Nine-test hosted suites complete with zero timeouts on the unchanged `basic` instance; see [`issue-14-hosted-runner.md`](issue-14-hosted-runner.md).
+
 ## Rollout and rollback
 
 Deployment followed the plan:

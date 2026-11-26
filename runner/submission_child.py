@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """Loads and executes one submission inside a disposable child process.
 
-The harness never loads submission code itself. This child returns a tagged
-actual value over a dedicated pipe; it does not have the harness's evidence file
-descriptor, so submission output cannot overwrite the result envelope.
+The runner never loads submission code itself. This child returns a tagged
+actual value over a dedicated pipe; it does not have the runner's evidence pipe,
+so submission output cannot overwrite the result envelope.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import math
 import os
 import runpy
 import sys
-import traceback
 from typing import Any
 
 MAX_ACTUAL_BYTES = 1024 * 1024
@@ -79,6 +77,12 @@ def failure(message: str) -> dict[str, Any]:
     return {"outcome": "execution_error", "diagnostic": message[:MAX_DIAGNOSTIC]}
 
 
+def diagnostic(error: BaseException) -> str:
+    import traceback
+
+    return "".join(traceback.format_exception(type(error), error, error.__traceback__))
+
+
 def main() -> int:
     job_path = sys.argv[1]
     result_fd = int(sys.argv[2])
@@ -93,6 +97,8 @@ def main() -> int:
         if is_script:
             runpy.run_path(job["sourcePath"], run_name="__main__")
         else:
+            import importlib.util
+
             spec = importlib.util.spec_from_file_location("submission", job["sourcePath"])
             if spec is None or spec.loader is None:
                 raise RuntimeError("submission could not be loaded")
@@ -103,8 +109,7 @@ def main() -> int:
                 raise TypeError(f"{job['entryPoint']} is not callable")
             value = function(*job["arguments"])
     except MemoryError as error:
-        detail = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-        payload = failure(detail)
+        payload = failure(diagnostic(error))
         payload["memoryError"] = True
         write_result(result_fd, payload)
         return 0
@@ -112,12 +117,10 @@ def main() -> int:
         if is_script and (error.code is None or error.code == 0):
             write_result(result_fd, {"outcome": "completed"})
             return 0
-        detail = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-        write_result(result_fd, failure(detail))
+        write_result(result_fd, failure(diagnostic(error)))
         return 0
     except BaseException as error:  # Unhandled exceptions are execution errors.
-        detail = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-        write_result(result_fd, failure(detail))
+        write_result(result_fd, failure(diagnostic(error)))
         return 0
 
     if is_script:

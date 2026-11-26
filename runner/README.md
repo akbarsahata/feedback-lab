@@ -6,6 +6,7 @@ Protocol 2 (`native-python-runner/2`) supports both formats. The runner rejects 
 
 - **Function jobs** load the source and call `entryPoint(*arguments)`, returning a tagged actual value.
 - **Script jobs** execute the file with `run_name="__main__"` and supply the complete configured UTF-8 stdin byte-for-byte, then close the pipe at EOF. The Worker compares captured stdout after CRLF→LF and at most one final LF is removed. Invalid UTF-8 stdout is returned as a completed execution with `stdoutValid: false`; the Worker records it as an Execution error. Resource limits keep precedence over output interpretation.
+- **Bytecode cache** is built into the image. The `python:3.12.11-slim-bookworm` base ships empty `__pycache__` directories, so without this step every process recompiles stdlib imports such as `json`, `re`, and `enum` inside the 0.25 vCPU container. Startup still counts toward the 2-second wall-clock limit; the cache keeps it small.
 
 ## Contract tests
 
@@ -13,9 +14,9 @@ Protocol 2 (`native-python-runner/2`) supports both formats. The runner rejects 
 python3 -m unittest discover -s runner -p 'test_*.py' -v
 ```
 
-The memory-limit test runs only on Linux because macOS does not enforce address-space limits the same way. The harness keeps the evidence descriptor out of the submission child; the child returns only its tagged actual value or script completion envelope over a separate pipe. Script stdin is written by the harness, not embedded in the submission child's argument list.
+The memory-limit test runs only on Linux because macOS does not enforce address-space limits the same way. The runner spawns the submission child directly and drains its result envelope over a dedicated pipe; the child has no access to the runner's request socket. Script stdin is fed by the runner over a non-blocking pipe, not embedded in the submission child's argument list.
 
-Script contract tests cover `__main__`, full-size UTF-8 stdin through EOF, empty input and output, a script that does not consume all stdin, CRLF output, nonzero exit, unhandled exceptions, `sys.exit(0)`, invalid stdout, resource limits, artifact mismatches, and the private HTTP `/health` and `/run` endpoints.
+Script contract tests cover `__main__`, full-size UTF-8 stdin through EOF, empty input and output, a script that does not consume all stdin, stdin larger than the pipe buffer (consumed and ignored), CRLF output, nonzero exit, `sys.exit(0)`, abrupt `os._exit(0)`, unhandled exceptions, invalid stdout, resource limits, artifact mismatches, and the private HTTP `/health` and `/run` endpoints.
 
 ## Local one-shot
 
