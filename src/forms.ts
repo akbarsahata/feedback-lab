@@ -4,6 +4,7 @@ export interface ParsedAssignmentForm {
   raw: RawConfig;
   csrfToken: string;
   baseVersionId: string;
+  confirmedFormatSwitch: boolean;
 }
 
 interface MutableRow {
@@ -67,6 +68,7 @@ export function parseAssignmentForm(form: FormData): ParsedAssignmentForm {
     },
     csrfToken: formString(form, '_csrf'),
     baseVersionId: formString(form, 'baseVersionId'),
+    confirmedFormatSwitch: formString(form, 'confirmFormatSwitch') === 'yes',
   };
 }
 

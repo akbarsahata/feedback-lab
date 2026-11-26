@@ -341,14 +341,15 @@ class ScriptRunnerContractTests(unittest.TestCase):
         with self.assertRaises(runner.JobError):
             runner.validate_job(missing)
 
-    def test_legacy_function_protocol_still_runs(self) -> None:
+    def test_rejects_jobs_pinned_to_another_artifact(self) -> None:
         legacy = job("def answer():\n    return 7\n")
         legacy["protocol"] = 1
-        legacy["runnerArtifact"] = runner.LEGACY_RUNNER_ARTIFACT
-        result = runner.execute_job(legacy, warm=False)
-        self.assertEqual(result["protocol"], 1)
-        self.assertEqual(result["runnerArtifact"], runner.LEGACY_RUNNER_ARTIFACT)
-        self.assertEqual(result["outcome"], "completed")
+        legacy["runnerArtifact"] = "native-python-runner/1"
+        with self.assertRaisesRegex(runner.JobError, "unsupported protocol"):
+            runner.validate_job(legacy)
+        legacy["protocol"] = runner.PROTOCOL
+        with self.assertRaisesRegex(runner.JobError, "runnerArtifact"):
+            runner.validate_job(legacy)
 
     def test_private_http_endpoint_runs_script_jobs_and_rejects_invalid_ones(self) -> None:
         probe = socket.socket()

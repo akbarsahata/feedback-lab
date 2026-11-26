@@ -68,6 +68,7 @@ export interface AssignmentFormPageOptions {
   raw: RawConfig;
   baseVersionId?: string;
   initialFormat?: AssignmentFormat;
+  confirmedFormatSwitch?: boolean;
   errors?: ConfigErrors;
   conflict?: boolean;
 }
@@ -79,6 +80,7 @@ export function assignmentFormPage({
   raw,
   baseVersionId,
   initialFormat = raw.format ?? 'function',
+  confirmedFormatSwitch = false,
   errors = {},
   conflict,
 }: AssignmentFormPageOptions): string {
@@ -153,6 +155,8 @@ ${escapeHtml(raw.description)}</textarea>
     <div class="stack">
       <div id="format-switch-warning" class="alert alert-warn" role="alert"${format === initialFormat ? ' hidden' : ''}>
         Switching the assignment format creates a new version and a new test suite. Configure every test for the selected format before saving; existing test rows keep their IDs but not their other fields.
+        ${isEdit ? `<label class="format-confirmation"><input type="checkbox" name="confirmFormatSwitch" value="yes"${confirmedFormatSwitch ? ' checked' : ''}>
+          <span>I configured the tests for the selected format. Any blank script input or expected stdout is intentional.</span></label>` : ''}
       </div>
       <section class="panel" aria-label="Tests">
         <div class="panel-top"><h2>Tests</h2><button type="button" data-add="tests">Add test</button></div>
@@ -467,7 +471,7 @@ function shortId(id: string): string {
   return id.slice(0, 8);
 }
 
-function formatLabel(format: AssignmentFormat): string {
+export function formatLabel(format: AssignmentFormat): string {
   return format === 'script' ? 'Script' : 'Function';
 }
 

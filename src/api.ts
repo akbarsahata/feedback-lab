@@ -11,13 +11,13 @@ import {
 import { requireResearcher } from './guard';
 import {
   assignmentsResponseSchema,
-  configRequestSchema,
+  createRequestSchema,
   errorResponseSchema,
   reviseRequestSchema,
   validationErrorResponseSchema,
   versionResponseSchema,
   versionsResponseSchema,
-  wrappedCreateRequestSchema,
+  type AssignmentVersionPayload,
 } from './api-schemas';
 import { validatedJsonResponse } from './validated-response';
 import type { z } from 'zod';
@@ -34,11 +34,6 @@ import {
 } from './repository';
 
 class InvalidRequestError extends Error {}
-class InvalidConfigError extends Error {
-  constructor(readonly errors: ConfigErrors) {
-    super('Invalid assignment configuration.');
-  }
-}
 
 export async function handleAssignmentsApi(
   request: Request,
@@ -61,9 +56,6 @@ export async function handleAssignmentsApi(
         { error: 'invalid_request', message: error.message },
         400,
       );
-    }
-    if (error instanceof InvalidConfigError) {
-      return invalidConfigResponse(error.errors);
     }
     throw error;
   }
@@ -151,10 +143,7 @@ async function createHandler(
     return writeError;
   }
 
-  const body = await readJsonObject(request);
-  const config = Object.hasOwn(body, 'config')
-    ? parseRequest(wrappedCreateRequestSchema, body).config
-    : parseRequest(configRequestSchema, body);
+  const config = parseRequest(createRequestSchema, await readJsonObject(request));
   const validation = validateConfig(config);
   if (!validation.ok) {
     return invalidConfigResponse(validation.errors);
@@ -207,20 +196,11 @@ function parseRequest<S extends z.ZodType>(schema: S, body: Record<string, unkno
   const parsed = schema.safeParse(body);
   if (parsed.success) return parsed.data;
 
-  const scriptFields: Record<number, Record<string, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const path = issue.path[0] === 'config' ? issue.path.slice(1) : issue.path;
-    const [group, row, field] = path;
-    if (group === 'tests' && typeof row === 'number' &&
-      (field === 'stdin' || field === 'expectedStdout')) {
-      const label = field === 'stdin' ? 'Standard input' : 'Expected stdout';
-      (scriptFields[row] ??= {})[field] = `${label} must be a string. Send an empty string when blank.`;
-    }
-  }
-  if (Object.keys(scriptFields).length > 0) {
-    throw new InvalidConfigError({ tests: { rows: scriptFields } });
-  }
-  const issue = parsed.error.issues[0];
+  const first = parsed.error.issues[0];
+  const issues = first?.code === 'invalid_union' && first.errors.length === 2
+    ? first.errors[Object.hasOwn(body, 'config') ? 0 : 1]!
+    : parsed.error.issues;
+  const issue = issues[0];
   const path = issue?.path.length ? issue.path.join('.') : 'body';
   throw new InvalidRequestError(`${path}: ${issue?.message ?? 'Invalid request body.'}`);
 }
@@ -252,36 +232,15 @@ async function readJsonObject(request: Request): Promise<Record<string, unknown>
 }
 
 function versionResponse(version: AssignmentVersionDetail, changed?: boolean): Response {
-  const { criteria, tests, ...metadata } = version;
-  const suiteTests = tests.map((test) => test.comparisonRule === COMPARISON_RULE
-    ? {
-        id: test.id,
-        argumentsJson: test.argumentsJson,
-        expectedReturnJson: test.expectedReturnJson,
-        comparisonRule: test.comparisonRule,
-      }
-    : {
-        id: test.id,
-        stdin: test.stdin,
-        expectedStdout: test.expectedStdout,
-        comparisonRule: test.comparisonRule,
-      });
-  const body = {
-    ...(changed === undefined ? {} : { changed }),
-    version: {
-      ...metadata,
-      rubric: {
-        versionId: version.rubricVersionId,
-        criteria,
-      },
-      testSuite: {
-        versionId: version.testSuiteVersionId,
-        comparisonRule: version.format === 'script'
-          ? SCRIPT_COMPARISON_RULE
-          : COMPARISON_RULE,
-        tests: suiteTests,
-      },
-    },
-  };
-  return validatedJsonResponse(versionResponseSchema, body, changed ? 201 : 200);
+  const rubric = { versionId: version.rubricVersionId, criteria: version.criteria };
+  const versionId = version.testSuiteVersionId;
+  let payload: AssignmentVersionPayload;
+  if (version.format === 'function') {
+    const { criteria, tests, ...metadata } = version;
+    payload = { ...metadata, rubric, testSuite: { versionId, comparisonRule: COMPARISON_RULE, tests } };
+  } else {
+    const { criteria, tests, ...metadata } = version;
+    payload = { ...metadata, rubric, testSuite: { versionId, comparisonRule: SCRIPT_COMPARISON_RULE, tests } };
+  }
+  return validatedJsonResponse(versionResponseSchema, { changed, version: payload }, changed ? 201 : 200);
 }

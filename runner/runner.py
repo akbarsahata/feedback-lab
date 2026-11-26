@@ -29,9 +29,7 @@ from pathlib import Path
 from typing import Any
 
 PROTOCOL = 2
-LEGACY_PROTOCOL = 1
 RUNNER_ARTIFACT = "native-python-runner/2"
-LEGACY_RUNNER_ARTIFACT = "native-python-runner/1"
 STARTED_AT = time.monotonic()
 MAX_SOURCE_BYTES = 64 * 1024
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
@@ -47,23 +45,19 @@ class JobError(ValueError):
 def validate_job(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise JobError("job must be an object")
-    protocol = raw.get("protocol")
-    if protocol not in (PROTOCOL, LEGACY_PROTOCOL):
+    if raw.get("protocol") != PROTOCOL:
         raise JobError("unsupported protocol")
-    expected_artifact = RUNNER_ARTIFACT if protocol == PROTOCOL else LEGACY_RUNNER_ARTIFACT
     for field in ("runId", "testId", "source", "pythonRelease", "runnerArtifact"):
         if not isinstance(raw.get(field), str) or raw[field] == "":
             raise JobError(f"{field} must be a non-empty string")
-    if raw["runnerArtifact"] != expected_artifact:
+    if raw["runnerArtifact"] != RUNNER_ARTIFACT:
         raise JobError("runnerArtifact does not match this runner")
     if raw["pythonRelease"] != platform.python_version():
         raise JobError("pythonRelease does not match this runner")
-    format = raw.get("format", "function")
-    if protocol == PROTOCOL and format not in ("function", "script"):
+    format = raw.get("format")
+    if format not in ("function", "script"):
         raise JobError("format must be function or script")
     if format == "script":
-        if protocol != PROTOCOL:
-            raise JobError("script jobs require protocol 2")
         if not isinstance(raw.get("stdin"), str):
             raise JobError("stdin must be a string")
         for field in ("entryPoint", "argumentsJson"):
@@ -107,7 +101,7 @@ def execute_job(job: dict[str, Any], warm: bool) -> dict[str, Any]:
         source_path = work_path / "submission.py"
         job_path = work_path / "job.json"
         source_path.write_text(job["source"], encoding="utf-8")
-        format = job.get("format", "function")
+        format = job["format"]
         submission_job: dict[str, Any] = {
             "format": format,
             "sourcePath": str(source_path),
@@ -211,15 +205,15 @@ def finish_job(
     is_script = job.get("format") == "script"
     truncated = captured["truncated"]
     if not is_script:
-        # Preserve the function protocol's preview budget, including for old jobs.
+        # Keep the existing function output preview budget.
         stdout, stderr, preview_trimmed = cap_decoded_output(stdout, stderr, limits["outputBytes"])
         truncated = truncated or preview_trimmed
     common = {
-        "protocol": job["protocol"],
-        "format": job.get("format", "function"),
+        "protocol": PROTOCOL,
+        "format": job["format"],
         "runId": job["runId"],
         "testId": job["testId"],
-        "runnerArtifact": job["runnerArtifact"],
+        "runnerArtifact": RUNNER_ARTIFACT,
         "stdout": stdout,
         "stderr": stderr,
         "stdoutValid": stdout_valid,

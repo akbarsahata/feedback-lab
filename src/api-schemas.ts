@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { createDocument } from 'zod-openapi';
-import { COMPARISON_RULE, SCRIPT_COMPARISON_RULE, type RawConfig } from './config';
+import {
+  COMPARISON_RULE,
+  SCRIPT_COMPARISON_RULE,
+  type RawConfig,
+} from './config';
 import { parseJsonValue } from './json';
 
 const emailSchema = z.string().meta({
@@ -65,16 +69,19 @@ function functionJsonText(canonical: string | null | undefined, alias: unknown):
   return typeof alias === 'string' ? alias : '';
 }
 
+// Preserve the required string input in OpenAPI while allowing domain
+// validation to report a missing or invalid field alongside other row errors.
+const scriptTextInput = z.string().transform((text): string | undefined => text).catch(undefined);
 const scriptTestRequestSchema = z.object({
   id: z.string().refine((id) => id.trim() !== '', 'Enter a stable test ID.').meta({
     description: 'Stable test ID, unique within the suite.',
     example: 'two-values',
   }),
-  stdin: z.string().meta({
+  stdin: scriptTextInput.meta({
     description: 'Exact UTF-8 standard input, at most 16 KiB in encoded bytes. An explicit empty string is valid.',
     example: '1\n2\n',
   }),
-  expectedStdout: z.string().meta({
+  expectedStdout: scriptTextInput.meta({
     description: 'Exact expected UTF-8 standard output, at most 16 KiB in encoded bytes. An explicit empty string is valid.',
     example: '3\n',
   }),
@@ -104,10 +111,12 @@ const scriptConfigRequestSchema = z.object({
   ...configFields,
   format: z.literal('script'),
   entryPoint: textInput.meta({ description: 'Omit for scripts; there is no function entry point.' }),
-  tests: z.array(scriptTestRequestSchema),
+  tests: z.array(scriptTestRequestSchema).prefault([]).meta({
+    description: 'Supply at least one script test.',
+  }),
 });
 
-export const configRequestSchema = z.discriminatedUnion('format', [
+const configRequestSchema = z.discriminatedUnion('format', [
   functionConfigRequestSchema, scriptConfigRequestSchema,
 ]).transform((config): RawConfig => ({
   title: config.title ?? '',
@@ -121,16 +130,19 @@ export const configRequestSchema = z.discriminatedUnion('format', [
   description: 'Each suite uses only the test fields for its format (default: function). Supply a rubric and a test suite with unique IDs, at most 100 rows each, and at most 1 MiB of saved configuration.',
 });
 
-export const wrappedCreateRequestSchema = z.object({ config: configRequestSchema });
+const bareCreateRequestSchema = configRequestSchema.and(
+  z.object({ config: z.never().optional() }),
+);
 export const createRequestSchema = z.union([
-  wrappedCreateRequestSchema,
-  configRequestSchema,
+  z.object({ config: configRequestSchema }).transform(({ config }) => config),
+  bareCreateRequestSchema,
 ]).meta({ id: 'CreateAssignmentRequest' });
 
 export const reviseRequestSchema = z.object({
   baseVersionId: z.string().refine((id) => id.trim() !== '', 'baseVersionId is required.'),
-  config: configRequestSchema,
-}).meta({ id: 'ReviseAssignmentRequest' });
+}).and(createRequestSchema)
+  .transform(({ baseVersionId, ...config }) => ({ baseVersionId, config }))
+  .meta({ id: 'ReviseAssignmentRequest' });
 
 const rubricCriterionSchema = z.object({
   id: z.string(),
@@ -206,6 +218,7 @@ export const assignmentVersionSchema = z.discriminatedUnion('format', [
   functionVersionSchema,
   scriptVersionSchema,
 ]).meta({ id: 'AssignmentVersion' });
+export type AssignmentVersionPayload = z.infer<typeof assignmentVersionSchema>;
 
 export const versionResponseSchema = z.object({
   changed: z.boolean().optional(),
@@ -273,7 +286,17 @@ const configErrorsSchema = z.object({
 });
 
 export const errorResponseSchema = z.object({
-  error: z.string(),
+  error: z.enum([
+    'forbidden',
+    'internal_error',
+    'invalid_csrf',
+    'invalid_origin',
+    'invalid_request',
+    'method_not_allowed',
+    'not_found',
+    'stale_version',
+    'unauthenticated',
+  ]),
   message: z.string().optional(),
   currentVersionId: z.string().optional(),
 }).meta({ id: 'ErrorResponse', description: 'A documented JSON API failure body.' });

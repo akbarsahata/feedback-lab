@@ -422,6 +422,32 @@ describe('test runs', () => {
       }),
     ).rejects.toThrow(StaleLaunchError);
   });
+
+  it('marks a queued run incomplete rather than substituting its pinned artifact', async () => {
+    const researcher = await signIn(await seedUser());
+    const version = await createAssignment(researcher);
+    const runId = await launch(researcher, version);
+    await env.DB.prepare('UPDATE test_runs SET runner_artifact = ? WHERE id = ?')
+      .bind('native-python-runner/1', runId).run();
+
+    let dispatched = false;
+    await executeRun(env, runId, {
+      runner: {
+        async runTest(job) {
+          dispatched = true;
+          return result(job, { kind: 'none' });
+        },
+      },
+    });
+    expect(dispatched).toBe(false);
+    const run = await getTestRun(env.DB, runId);
+    expect(run).toMatchObject({
+      status: 'incomplete',
+      runnerArtifact: 'native-python-runner/1',
+      incompleteReason: 'The pinned runner artifact is no longer available.',
+    });
+    expect(run.tests.map((test) => test.status)).toEqual(['not_run', 'not_run']);
+  });
 });
 
 function scriptResult(stdout: string, overrides: Partial<RunnerResult> = {}): RunnerResult {
@@ -446,7 +472,7 @@ describe('script test runs', () => {
     const researcher = await signIn(await seedUser());
     const version = await createScriptAssignment(researcher);
     expect(version.format).toBe('script');
-    expect(version.entryPoint).toBeUndefined();
+    expect(version).not.toHaveProperty('entryPoint');
     expect(version.testSuite.tests[0]).toMatchObject({
       id: 'two-values',
       stdin: '1\n2\n',

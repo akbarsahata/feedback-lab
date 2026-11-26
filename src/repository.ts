@@ -92,6 +92,37 @@ interface VersionRow {
   created_by_email: string;
 }
 
+export interface StoredTestRow {
+  test_id: string;
+  arguments_json: string | null;
+  expected_return_json: string | null;
+  stdin: string | null;
+  expected_stdout: string | null;
+  comparison_rule: TestCase['comparisonRule'];
+}
+
+export function readStoredTest(row: StoredTestRow): TestCase | null {
+  if (row.comparison_rule === COMPARISON_RULE && row.arguments_json !== null
+    && row.expected_return_json !== null) {
+    return {
+      id: row.test_id,
+      argumentsJson: row.arguments_json,
+      expectedReturnJson: row.expected_return_json,
+      comparisonRule: row.comparison_rule,
+    };
+  }
+  if (row.comparison_rule === SCRIPT_COMPARISON_RULE && row.stdin !== null
+    && row.expected_stdout !== null) {
+    return {
+      id: row.test_id,
+      stdin: row.stdin,
+      expectedStdout: row.expected_stdout,
+      comparisonRule: row.comparison_rule,
+    };
+  }
+  return null;
+}
+
 export async function listAssignments(db: D1Database): Promise<AssignmentSummary[]> {
   const { results } = await db
     .prepare(
@@ -362,14 +393,7 @@ async function loadVersionDetail(
          ORDER BY position ASC`,
       )
       .bind(row.test_suite_version_id)
-      .all<{
-        test_id: string;
-        arguments_json: string | null;
-        expected_return_json: string | null;
-        stdin: string | null;
-        expected_stdout: string | null;
-        comparison_rule: TestCase['comparisonRule'];
-      }>(),
+      .all<StoredTestRow>(),
   ]);
 
   const base = {
@@ -394,17 +418,12 @@ async function loadVersionDetail(
       ...base,
       format: 'function',
       entryPoint: row.entry_point ?? '',
-      tests: testsResult.results.map((test): FunctionTestCase => {
-        if (test.comparison_rule !== COMPARISON_RULE || test.arguments_json === null
-          || test.expected_return_json === null) {
+      tests: testsResult.results.map((row): FunctionTestCase => {
+        const test = readStoredTest(row);
+        if (test?.comparisonRule !== COMPARISON_RULE) {
           throw new Error('The saved function test is inconsistent with its assignment version.');
         }
-        return {
-          id: test.test_id,
-          argumentsJson: test.arguments_json,
-          expectedReturnJson: test.expected_return_json,
-          comparisonRule: test.comparison_rule,
-        };
+        return test;
       }),
     };
   }
@@ -412,17 +431,12 @@ async function loadVersionDetail(
   return {
     ...base,
     format: 'script',
-    tests: testsResult.results.map((test): ScriptTestCase => {
-      if (test.comparison_rule !== SCRIPT_COMPARISON_RULE || test.stdin === null
-        || test.expected_stdout === null) {
+    tests: testsResult.results.map((row): ScriptTestCase => {
+      const test = readStoredTest(row);
+      if (test?.comparisonRule !== SCRIPT_COMPARISON_RULE) {
         throw new Error('The saved script test is inconsistent with its assignment version.');
       }
-      return {
-        id: test.test_id,
-        stdin: test.stdin,
-        expectedStdout: test.expected_stdout,
-        comparisonRule: test.comparison_rule,
-      };
+      return test;
     }),
   };
 }

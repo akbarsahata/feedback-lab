@@ -21,8 +21,8 @@ Observed:
 | Check | Result |
 | --- | --- |
 | `npm run typecheck` | Pass |
-| `npm test` | Pass: 12 files / 166 tests |
-| Native runner contract tests | Pass: 28 tests, including script `__main__`, stdin through EOF, empty input/output, CRLF, nonzero exit, invalid UTF-8, limits, legacy protocol 1, and the private HTTP endpoint |
+| `npm test` | Pass: 12 files / 168 tests |
+| Native runner contract tests | Pass: 28 tests, including script `__main__`, stdin through EOF, empty input/output, CRLF, nonzero exit, invalid UTF-8, limits, artifact mismatch, and the private HTTP endpoint |
 | `npx wrangler deploy --dry-run` | Pass: bundled the Worker and same-origin assets without deploying |
 | Local Chromium smoke | Pass: researcher can execute a GET in Swagger UI; POST operations have no Try it out. Signed-out users and members cannot fetch the docs, spec, bundle, or stylesheet. |
 
@@ -31,7 +31,7 @@ Observed:
 - Function and script configuration share the versioned assignment/rubric/test-suite model. Script tests are single-format and reject fields from the other variant.
 - Explicit empty `stdin`/`expectedStdout` are accepted; missing API fields, duplicate IDs, non-round-tripping UTF-8, and fields over 16 KiB of UTF-8 produce actionable row errors without writes.
 - Script text is stored without trimming or newline normalization. With a local D1 database and the Worker running in Wrangler, Chromium confirmed that an unchanged editor save preserves mixed LF/CRLF data from the API and that editing a textarea preserves LF, leading blank lines, and trailing spaces. Adding a row after selecting Script showed script fields; a duplicate-ID validation response preserved the draft text and format-switch warning.
-- A format switch creates a new assignment version and a new single-format test suite. Unchanged saves are no-ops. Old versions and runs keep their original IDs, format, source, expectations, and evidence.
+- A format switch creates a new assignment version and a new single-format test suite. Chromium confirmed the editor prevents an unconfirmed format switch and saves exact text after the researcher confirms the tests, including deliberately empty fields. Unchanged saves are no-ops. Old versions and runs keep their original IDs, format, source, expectations, and evidence.
 - Launches use the active version and fail stale launches with no new run.
 - The native runner executes scripts as `__main__` in a fresh child, writes stdin byte-for-byte and closes it at EOF, captures stdout/stderr separately, preserves the existing 2 s / 128 MiB / 16 KiB limits, and keeps resource-limit outcomes ahead of output interpretation.
 - Worker comparison uses expected stdout only after normal completion with complete valid UTF-8: CRLF→LF on both sides, remove at most one final LF, then exact comparison. `7` and `7\n` pass; `7 `, `7\n\n`, and `Answer: 7` mismatch. Invalid UTF-8 stdout is an Execution error with a bounded lossy preview and is never compared.
@@ -44,9 +44,9 @@ Local tests use a fake runner and the native Python contract tests. They do not 
 
 ## Rollout sequencing
 
-The runner artifact is protocol 2 (`native-python-runner/2`). The runner also accepts legacy protocol 1 (`native-python-runner/1`) function jobs. New script jobs are protocol 2 only.
+Both formats use protocol 2 (`native-python-runner/2`). The coordinator leaves a run incomplete if its pinned runner artifact is unavailable. Historical runs retain the original artifact and evidence.
 
-1. **Pause launches and drain the existing queue before changing the artifact.** Wait until queued and running test runs finish with the artifact they pinned. With launches still paused, build and deploy the issue #3 private runner. The new runner also accepts protocol 1 function requests for compatibility; this does not change the requirement to drain before replacing the hosted image.
+1. **Pause launches and drain the existing queue before changing the artifact.** Wait until queued and running test runs finish with the artifact they pinned. With launches still paused, build and deploy the issue #3 private runner.
 2. **D1 migration second.** Apply `0003_script_assignments.sql` on a copy first. The migration rebuilds the cyclic assignment/run graph through parallel tables before renaming them, preserving IDs, source bytes, active versions, and all evidence. Confirm `PRAGMA foreign_key_check` is empty and row counts match before applying to production. The function-only app can read and write function data against this schema.
 3. **App Worker last.** Deploy the new editor, script launch/evidence paths, runtime Zod validation, and generated docs. Restore launches once the app, schema, and private runner match.
 
@@ -55,7 +55,7 @@ The runner artifact is protocol 2 (`native-python-runner/2`). The runner also ac
 Drain all queued and running protocol 2 runs before a rollback; do not roll components independently while work is in flight.
 
 - **App rollback:** after the drain, the previous function-only app can run against schema `0003` for function reads and writes. Script assignments remain in the database but are not editable or launchable by the old app. Do not reverse migration `0003`; script rows and new columns must remain.
-- **Runner rollback:** roll the app back first, then the runner. The old runner accepts neither protocol 2 function jobs nor script jobs, so any protocol 2 run still in flight would fail. Previously queued legacy `native-python-runner/1` function jobs remain safe.
+- **Runner rollback:** keep launches paused while rolling back the app and then the runner. Resume launches only when the protocol 1 app and runner are both active.
 - **Data rollback:** there is no safe destructive reversal. Preserve script rows and the rebuilt tables; restoring a pre-migration snapshot would discard script data written after the release.
 
 ## Hosted verification required before closing #3

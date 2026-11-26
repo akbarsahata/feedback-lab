@@ -187,8 +187,10 @@ describe('create and reopen a function assignment', () => {
     expect(wire).not.toContain('"arguments":');
     expect(wire).not.toContain('"expectedReturn":');
     const reopened = JSON.parse(wire).version as SerializedVersion;
-    expect(reopened.testSuite.tests[0]?.argumentsJson).toBe(args);
-    expect(reopened.testSuite.tests[0]?.expectedReturnJson).toBe(expected);
+    expect(reopened.testSuite.tests[0]).toMatchObject({
+      argumentsJson: args,
+      expectedReturnJson: expected,
+    });
     const original = await apiJson(`${collection}/${first.id}`, { session: researcher });
     expect(original.body.version.testSuite.tests[0].expectedReturnJson).toBe('{"10":[2,1],"2":3,"x":5}');
     expect(original.body.version.testSuite.tests[0].argumentsJson).toBe(
@@ -237,8 +239,7 @@ describe('create and reopen a function assignment', () => {
     expect(response.status).toBe(201);
     const version = body.version as SerializedVersion;
     expect(version.versionNumber).toBe(1);
-    expect(version.format).toBe('function');
-    expect(version.entryPoint).toBe('first_positive');
+    expect(version).toMatchObject({ format: 'function', entryPoint: 'first_positive' });
     expect(version.rubricVersionId).toBeTruthy();
     expect(version.testSuiteVersionId).toBeTruthy();
     expect(version.createdBy.email).toBe(researcher.user.email);
@@ -251,13 +252,14 @@ describe('create and reopen a function assignment', () => {
     const first = version.testSuite.tests[0]!;
     expect(first).not.toHaveProperty('arguments');
     expect(first).not.toHaveProperty('expectedReturn');
-    expect(first.argumentsJson).toBe('[[4,-1]]');
-    expect(first.expectedReturnJson).toBe('4');
-    expect(first.comparisonRule).toBe('function-value-v1');
+    expect(first).toMatchObject({
+      argumentsJson: '[[4,-1]]',
+      expectedReturnJson: '4',
+      comparisonRule: 'function-value-v1',
+    });
 
     const second = version.testSuite.tests[1]!;
-    expect(second.argumentsJson).toBe('[[]]');
-    expect(second.expectedReturnJson).toBe('null');
+    expect(second).toMatchObject({ argumentsJson: '[[]]', expectedReturnJson: 'null' });
   });
 
   it('lists assignments with active title and rubric/test counts', async () => {
@@ -353,7 +355,7 @@ describe('validation through the API', () => {
       tests: [{ id: 'nested', arguments: '[]', expectedReturn: nesting(64) }],
     }));
     expect(valid.status).toBe(201);
-    expect(valid.version.testSuite.tests[0]?.expectedReturnJson).toBe(nesting(64));
+    expect(valid.version.testSuite.tests[0]).toMatchObject({ expectedReturnJson: nesting(64) });
     const result = await createAssignment(researcher, assignmentConfig({
       tests: [{
         id: 'nested',
@@ -403,6 +405,17 @@ describe('validation through the API', () => {
     const { response, body } = await postJson('/api/assignments', { config: 'nope' }, researcher);
     expect(response.status).toBe(400);
     expect(body.error).toBe('invalid_request');
+  });
+
+  it('still accepts a bare function configuration on revision', async () => {
+    const researcher = await signIn(await seedUser());
+    const { version } = await createAssignment(researcher);
+    const updated = await postJson(`/api/assignments/${version.assignmentId}/versions`, {
+      ...assignmentConfig({ title: 'Bare update' }),
+      baseVersionId: version.id,
+    }, researcher);
+    expect(updated.response.status).toBe(201);
+    expect(updated.body.version).toMatchObject({ title: 'Bare update', format: 'function' });
   });
 });
 
@@ -679,7 +692,7 @@ describe('script configuration through the JSON API', () => {
     expect(response.status).toBe(201);
     const version = body.version as SerializedVersion;
     expect(version.format).toBe('script');
-    expect(version.entryPoint).toBeUndefined();
+    expect(version).not.toHaveProperty('entryPoint');
     expect(version.testSuite.comparisonRule).toBe('script-stdout-v1');
     expect(version.testSuite.tests[0]).toEqual({
       id: 'exact',
@@ -700,10 +713,24 @@ describe('script configuration through the JSON API', () => {
   it('rejects missing script fields, mixed fields, duplicates, and oversized text without writing', async () => {
     const researcher = await signIn(await seedUser());
     const missing = await postJson('/api/assignments', {
-      config: scriptConfig({ tests: [{ id: 'missing', stdin: '' }] }),
+      config: scriptConfig({
+        title: undefined,
+        tests: [
+          { id: 'same', stdin: '' },
+          { id: 'same', stdin: 'é'.repeat(8 * 1024 + 1), expectedStdout: '' },
+        ],
+      }),
     }, researcher);
     expect(missing.response.status).toBe(400);
-    expect(missing.body.errors.tests.rows['0'].expectedStdout).toMatch(/expected stdout/i);
+  expect(missing.body.errors.tests.rows['0'].expectedStdout).toMatch(/expected stdout/i);
+    expect(missing.body.errors.title).toMatch(/title/i);
+    expect(missing.body.errors.tests.rows['1'].id).toMatch(/already used/i);
+    expect(missing.body.errors.tests.rows['1'].stdin).toMatch(/16 KiB/);
+    const noTests = await postJson('/api/assignments', {
+      config: { ...scriptConfig(), tests: undefined },
+    }, researcher);
+    expect(noTests.response.status).toBe(400);
+    expect(noTests.body.errors.tests.message).toMatch(/add at least one test/i);
     expect(await countRows('assignments')).toBe(0);
 
     const mixedFunction = await postJson('/api/assignments', {

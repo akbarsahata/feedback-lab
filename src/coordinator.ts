@@ -1,3 +1,4 @@
+import { SCRIPT_COMPARISON_RULE, type TestCase } from './config';
 import {
   compareFunctionValue,
   FunctionValueError,
@@ -13,13 +14,11 @@ import {
   markRunIncomplete,
   markTestRunning,
   recordTestResult,
-  LEGACY_RUNNER_ARTIFACT,
-  type TestExecutionInput,
+  RUNNER_ARTIFACT,
   type RunTestSummary,
   type TestRunDetail,
 } from './runs';
 import {
-  LEGACY_RUNNER_PROTOCOL,
   RUNNER_PROTOCOL,
   RunnerProtocolError,
   createServiceRunner,
@@ -55,6 +54,16 @@ export async function executeRun(
 
   const started = await claimRun(env.DB, runId, clock().toISOString());
   if (!started) return;
+
+  if (run.runnerArtifact !== RUNNER_ARTIFACT) {
+    await markRunIncomplete(
+      env.DB,
+      runId,
+      'The pinned runner artifact is no longer available.',
+      clock().toISOString(),
+    );
+    return;
+  }
 
   let runner: Runner;
   try {
@@ -116,22 +125,19 @@ export async function executeRun(
 function jobFor(
   run: TestRunDetail,
   test: RunTestSummary,
-  input: TestExecutionInput,
+  input: TestCase,
   source: string,
 ): RunnerJob {
-  const legacy = run.runnerArtifact === LEGACY_RUNNER_ARTIFACT;
-  const protocol: typeof LEGACY_RUNNER_PROTOCOL | typeof RUNNER_PROTOCOL =
-    legacy ? LEGACY_RUNNER_PROTOCOL : RUNNER_PROTOCOL;
   const common = {
-    protocol,
+    protocol: RUNNER_PROTOCOL,
     runId: run.id,
     testId: test.id,
     source,
     pythonRelease: run.pythonRelease,
     runnerArtifact: run.runnerArtifact,
     limits: run.limits,
-  };
-  if (input.format === 'script') {
+  } as const;
+  if (input.comparisonRule === SCRIPT_COMPARISON_RULE) {
     return { ...common, format: 'script', stdin: input.stdin };
   }
   return {
@@ -143,7 +149,7 @@ function jobFor(
 }
 
 function classify(
-  input: TestExecutionInput,
+  input: TestCase,
   result: RunnerResult,
 ): {
   status:
@@ -182,7 +188,7 @@ function classify(
     };
   }
 
-  if (input.format === 'script') {
+  if (input.comparisonRule === SCRIPT_COMPARISON_RULE) {
     if (!result.stdoutValid) {
       return {
         ...common,

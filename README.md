@@ -171,12 +171,7 @@ Production uses the `feedback-lab` Worker and D1 database at <https://python-ass
 
 The app now ships pinned Swagger UI assets from `public/` through the `ASSETS` binding. `/api/docs` and `/api/docs/*` use `run_worker_first`, so the researcher guard runs before any docs asset. If the assets change, run `npm install` and copy the pinned files from `node_modules/swagger-ui-dist` into `public/api/docs/`; do not load Swagger UI from a CDN.
 
-For a format migration, deploy in this order so queued runs are never routed to an incompatible artifact:
-
-1. Pause new launches and drain queued/running work on its pinned artifact. Then deploy the private runner Worker/image.
-2. Apply D1 migration `0003_script_assignments.sql`. It preserves IDs, source bytes, and evidence and is readable by the previous function-only app.
-3. Deploy the app Worker with the new JSON contract, editor, and generated docs.
-4. Complete the hosted checklist below.
+For an upgrade from the function-only release, follow the [issue #3 rollout and rollback instructions](docs/verification/issue-3-hosted-runner.md#rollout-sequencing).
 
 For an initial deployment, authenticate Wrangler and select the Cloudflare account that owns `akbarsahata.id`. Then:
 
@@ -193,8 +188,6 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
 6. `npm run deploy`.
 7. Complete the hosted checklist below.
 
-Rollback: drain all queued and running protocol 2 runs first, then roll the app back to the function-only release, then roll the runner back. The old runner does not accept protocol 2 function or script jobs, and the old app cannot launch script runs. The function-only app can still read and write function data against schema 0003; script assignments remain stored but are not editable in the old UI. Do not reverse migration 0003 and do not delete script data written in the new format.
-
 ### Local verification performed
 
 - `npm test` (all unit and Workers-runtime integration tests) passes.
@@ -205,7 +198,7 @@ Rollback: drain all queued and running protocol 2 runs first, then roll the app 
 - Local Workers-runtime tests verify that anonymous sign-in is throttled without replacing or blocking an existing session.
 - `npm test` also covers `function-value-v1`, exact-version launch rejection, 64 KiB upload bounds, source byte preservation including a UTF-8 BOM, typed evidence, continuation after failures, duplicate delivery, late-result rejection, reconciliation, and access to run pages.
 - Issue #3 coverage includes script configuration and 16 KiB/UTF-8 validation, exact stdin/expected-stdout preservation, format switches with old evidence retained, the stdout comparison matrix, invalid UTF-8 and resource-limit precedence, the old-migration D1 fixture with `foreign_key_check`, generated request/response schema checks, and researcher-only `/api/docs`, `/api/openapi.json`, and pinned assets.
-- `python3 -m unittest discover -s runner -p 'test_*.py'` covers the native runner contract, including timeout with child processes, output caps, invalid UTF-8 output, recursion, unsupported and cyclic returns, the 1 MiB return budget, script `__main__` execution, byte-exact stdin through EOF, empty input/output, CRLF preservation, nonzero exit, legacy protocol 1 jobs, and the private HTTP endpoint. The memory-limit case runs on Linux only.
+- `python3 -m unittest discover -s runner -p 'test_*.py'` covers the native runner contract, including timeout with child processes, output caps, invalid UTF-8 output, recursion, unsupported and cyclic returns, the 1 MiB return budget, script `__main__` execution, byte-exact stdin through EOF, empty input/output, CRLF preservation, nonzero exit, artifact mismatches, and the private HTTP endpoint. The memory-limit case runs on Linux only.
 
 ### Hosted verification checklist
 

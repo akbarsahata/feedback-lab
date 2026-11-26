@@ -295,8 +295,14 @@ async function reviseAssignmentForm(
 
   const baseVersionId = parsed.baseVersionId.trim() || undefined;
   const validation = validateConfig(parsed.raw);
-  if (!validation.ok || baseVersionId === undefined) {
-    const active = await getActiveVersion(env.DB, assignmentId);
+  const active = await getActiveVersion(env.DB, assignmentId);
+  const confirmationRequired = baseVersionId === active.id && parsed.raw.format !== active.format
+    && !parsed.confirmedFormatSwitch;
+  if (!validation.ok || baseVersionId === undefined || confirmationRequired) {
+    const errors = validation.ok ? {} : validation.errors;
+    if (confirmationRequired) {
+      errors.format = 'Confirm that the tests are configured for the selected format before saving.';
+    }
     return htmlResponse(
       assignmentFormPage({
         user: session,
@@ -304,8 +310,9 @@ async function reviseAssignmentForm(
         assignmentId,
         baseVersionId,
         initialFormat: active.format,
+        confirmedFormatSwitch: parsed.confirmedFormatSwitch,
         raw: parsed.raw,
-        errors: validation.ok ? undefined : validation.errors,
+        errors,
       }),
       422,
     );
@@ -332,6 +339,7 @@ async function reviseAssignmentForm(
           assignmentId,
           baseVersionId,
           initialFormat: active.format,
+          confirmedFormatSwitch: parsed.confirmedFormatSwitch,
           raw: parsed.raw,
           conflict: true,
         }),

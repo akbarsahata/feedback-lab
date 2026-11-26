@@ -5,6 +5,7 @@ export const formatSwitchScript = String.raw`
   const select = form.querySelector('select[name="format"]');
   const testTemplate = document.getElementById('tests-template');
   const warning = document.getElementById('format-switch-warning');
+  const confirmation = form.querySelector('input[name="confirmFormatSwitch"]');
   if (!select) return;
   const update = () => {
     const format = select.value;
@@ -19,8 +20,12 @@ export const formatSwitchScript = String.raw`
     const entryPoint = form.querySelector('input[name="entryPoint"]');
     if (entryPoint) entryPoint.required = format === 'function';
     if (warning) warning.hidden = format === form.dataset.initialFormat;
+    if (confirmation) confirmation.required = format !== form.dataset.initialFormat;
   };
-  select.addEventListener('change', update);
+  select.addEventListener('change', () => {
+    if (confirmation) confirmation.checked = false;
+    update();
+  });
   form.addEventListener('formdata', ({ formData }) => {
     if (select.value !== 'script') return;
     form.querySelectorAll('textarea[data-exact-text]').forEach((field) => {

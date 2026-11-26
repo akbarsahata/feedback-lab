@@ -165,17 +165,9 @@ describe('runner protocol', () => {
       .toThrow(/stdout/i);
   });
 
-  it('supports a legacy protocol 1 function response during rollout', () => {
-    const legacyJob = {
-      ...job,
-      protocol: 1,
-      runnerArtifact: 'native-python-runner/1',
-    } satisfies Pick<RunnerJob, 'protocol' | 'format' | 'runId' | 'testId' | 'limits' | 'runnerArtifact'>;
-    const parsed = parseRunnerResult(
-      response({ protocol: 1, runnerArtifact: 'native-python-runner/1', format: undefined }),
-      legacyJob,
-    );
-    expect(parsed.outcome).toBe('completed');
-    expect(parsed.actual).toEqual({ kind: 'none' });
+  it('rejects an older protocol or an artifact different from the one pinned to the job', () => {
+    expect(() => parseRunnerResult(response({ protocol: 1 }), job)).toThrow(/protocol/i);
+    expect(() => parseRunnerResult(response({ runnerArtifact: 'native-python-runner/1' }), job))
+      .toThrow(/identity/i);
   });
 });

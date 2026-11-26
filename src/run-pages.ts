@@ -12,7 +12,7 @@ import {
   testStatusLabel,
   visibleWhitespace,
 } from './run-format';
-import { formatTimestamp } from './pages';
+import { formatLabel, formatTimestamp } from './pages';
 
 export function runPage(
   user: SessionUser,
@@ -45,7 +45,7 @@ export function runPage(
   const body = `<div class="head">
   <div>
     <h1>Test run ${escapeHtml(run.id.slice(0, 8))}</h1>
-    <p class="muted">${escapeHtml(run.title)} · ${run.format === 'script' ? 'Script' : 'Function'} assignment · version ${run.assignmentVersionNumber} · queued ${escapeHtml(formatTimestamp(run.queuedAt))}</p>
+    <p class="muted">${escapeHtml(run.title)} · ${formatLabel(run.format)} assignment · version ${run.assignmentVersionNumber} · queued ${escapeHtml(formatTimestamp(run.queuedAt))}</p>
   </div>
   <div class="actions">
     <a class="button" href="/assignments/${escapeHtml(run.assignmentId)}/versions/${escapeHtml(run.assignmentVersionId)}">Assignment version</a>
@@ -138,7 +138,7 @@ ${escapeHtml(evidence.stderr)}</textarea></label>
     <p class="hint">${escapeHtml(outputDescription)}${evidence.format === 'script' && evidence.stdout === ''
       ? ' The saved stdout is an explicit empty string.'
       : ''}</p>
-    <p class="hint">Return value, printed output, and diagnostics are recorded separately. Reopen this run to compare it with <a href="/assignments/${escapeHtml(run.assignmentId)}/versions/${escapeHtml(run.assignmentVersionId)}">the exact assignment version</a>.</p>
+    <p class="hint">${evidence.format === 'script' ? 'Standard output, standard error, and diagnostics are recorded separately.' : 'Return value, printed output, and diagnostics are recorded separately.'} Reopen this run to compare it with <a href="/assignments/${escapeHtml(run.assignmentId)}/versions/${escapeHtml(run.assignmentVersionId)}">the exact assignment version</a>.</p>
   </div>
 </section>`;
 }

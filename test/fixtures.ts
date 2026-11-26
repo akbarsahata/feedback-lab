@@ -1,36 +1,7 @@
+import type { AssignmentVersionPayload } from '../src/api-schemas';
 import type { RawConfig } from '../src/config';
 
-export interface SerializedTest {
-  id: string;
-  comparisonRule: string;
-  argumentsJson?: string;
-  expectedReturnJson?: string;
-  stdin?: string;
-  expectedStdout?: string;
-}
-
-export interface SerializedVersion {
-  id: string;
-  assignmentId: string;
-  versionNumber: number;
-  title: string;
-  description: string;
-  format: 'function' | 'script';
-  entryPoint?: string;
-  rubricVersionId: string;
-  testSuiteVersionId: string;
-  rubric: {
-    versionId: string;
-    criteria: Array<{ id: string; description: string; expectedBehavior: string }>;
-  };
-  testSuite: {
-    versionId: string;
-    comparisonRule: string;
-    tests: SerializedTest[];
-  };
-  createdAt: string;
-  createdBy: { id: string; email: string };
-}
+export type SerializedVersion = AssignmentVersionPayload;
 
 export function assignmentConfig(overrides: Partial<RawConfig> = {}): RawConfig {
   return {
@@ -79,12 +50,12 @@ export function scriptConfig(overrides: Partial<RawConfig> = {}): RawConfig {
   };
 }
 
-export function versionToRawConfig(version: SerializedVersion): RawConfig {
+export function versionToRawConfig(version: AssignmentVersionPayload): RawConfig {
   return {
     title: version.title,
     description: version.description,
     format: version.format,
-    entryPoint: version.entryPoint ?? '',
+    entryPoint: version.format === 'function' ? version.entryPoint : undefined,
     criteria: version.rubric.criteria.map((criterion) => ({
       id: criterion.id,
       description: criterion.description,
@@ -93,13 +64,13 @@ export function versionToRawConfig(version: SerializedVersion): RawConfig {
     tests: version.format === 'function'
       ? version.testSuite.tests.map((test) => ({
           id: test.id,
-          arguments: test.argumentsJson ?? '',
-          expectedReturn: test.expectedReturnJson ?? '',
+          arguments: test.argumentsJson,
+          expectedReturn: test.expectedReturnJson,
         }))
       : version.testSuite.tests.map((test) => ({
           id: test.id,
-          stdin: test.stdin ?? '',
-          expectedStdout: test.expectedStdout ?? '',
+          stdin: test.stdin,
+          expectedStdout: test.expectedStdout,
         })),
   };
 }

@@ -685,11 +685,14 @@ describe('script assignments in the HTML editor', () => {
     const original = await createViaApi(researcher);
     const base = `/assignments/${original.assignmentId}`;
 
-    const switched = await postForm(
-      base,
-      formFields(scriptConfig({ title: 'Add two numbers script' }), original.id),
-      researcher,
-    );
+    const fields = formFields(scriptConfig({ title: 'Add two numbers script' }), original.id);
+    const unconfirmed = await postForm(base, fields, researcher);
+    expect(unconfirmed.status).toBe(422);
+    expect(await unconfirmed.text()).toContain('Confirm that the tests are configured');
+    expect(await countRows('assignment_versions')).toBe(1);
+
+    fields.confirmFormatSwitch = 'yes';
+    const switched = await postForm(base, fields, researcher);
     expect(switched.status).toBe(303);
     expect(switched.headers.get('location')).toBe(base);
 

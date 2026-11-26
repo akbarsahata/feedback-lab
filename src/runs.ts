@@ -3,12 +3,13 @@ import {
   SCRIPT_COMPARISON_RULE,
   type AssignmentFormat,
   type ComparisonRule,
+  type TestCase,
 } from './config';
+import { readStoredTest, type StoredTestRow } from './repository';
 
 export const MAX_SOURCE_BYTES = 64 * 1024;
 export const PYTHON_RELEASE = '3.12.11';
 export const RUNNER_ARTIFACT = 'native-python-runner/2';
-export const LEGACY_RUNNER_ARTIFACT = 'native-python-runner/1';
 
 export interface RunLimits {
   executionMs: number;
@@ -187,7 +188,7 @@ export interface TestRunDetail {
   entryPoint: string | null;
   rubricVersionId: string;
   testSuiteVersionId: string;
-  comparisonRule: string;
+  comparisonRule: ComparisonRule;
   pythonRelease: string;
   runnerArtifact: string;
   limits: RunLimits;
@@ -211,7 +212,7 @@ interface RunRow {
   entry_point: string | null;
   rubric_version_id: string;
   test_suite_version_id: string;
-  comparison_rule: string;
+  comparison_rule: ComparisonRule;
   python_release: string;
   runner_artifact: string;
   limits_json: string;
@@ -331,64 +332,22 @@ function warmFromRow(value: number | null): boolean | null {
   return value === null ? null : value === 1;
 }
 
-interface ExecutionInputRow {
-  format: AssignmentFormat;
-  arguments_json: string | null;
-  expected_return_json: string | null;
-  stdin: string | null;
-  expected_stdout: string | null;
-  comparison_rule: ComparisonRule;
-}
-
-export type TestExecutionInput =
-  | {
-      format: 'function';
-      comparisonRule: typeof COMPARISON_RULE;
-      argumentsJson: string;
-      expectedReturnJson: string;
-    }
-  | {
-      format: 'script';
-      comparisonRule: typeof SCRIPT_COMPARISON_RULE;
-      stdin: string;
-      expectedStdout: string;
-    };
-
 export async function getTestExecutionInput(
   db: D1Database,
   runId: string,
   testId: string,
-): Promise<TestExecutionInput | null> {
+): Promise<TestCase | null> {
   const row = await db
     .prepare(
-      `SELECT v.format AS format, t.arguments_json, t.expected_return_json,
+      `SELECT t.test_id, t.arguments_json, t.expected_return_json,
               t.stdin, t.expected_stdout, t.comparison_rule
        FROM test_runs r
-       JOIN assignment_versions v ON v.id = r.assignment_version_id
        JOIN tests t ON t.test_suite_version_id = r.test_suite_version_id
        WHERE r.id = ? AND t.test_id = ?`,
     )
     .bind(runId, testId)
-    .first<ExecutionInputRow>();
-  if (row === null) return null;
-  if (row.format === 'script') {
-    if (row.comparison_rule !== SCRIPT_COMPARISON_RULE || row.stdin === null
-      || row.expected_stdout === null) return null;
-    return {
-      format: 'script',
-      comparisonRule: row.comparison_rule,
-      stdin: row.stdin,
-      expectedStdout: row.expected_stdout,
-    };
-  }
-  if (row.comparison_rule !== COMPARISON_RULE || row.arguments_json === null
-    || row.expected_return_json === null) return null;
-  return {
-    format: 'function',
-    comparisonRule: row.comparison_rule,
-    argumentsJson: row.arguments_json,
-    expectedReturnJson: row.expected_return_json,
-  };
+    .first<StoredTestRow>();
+  return row === null ? null : readStoredTest(row);
 }
 
 export async function getRunTestEvidence(

@@ -2,7 +2,6 @@ import { RUN_LIMITS, type RunLimits } from './runs';
 import type { AssignmentFormat } from './config';
 
 export const RUNNER_PROTOCOL = 2;
-export const LEGACY_RUNNER_PROTOCOL = 1;
 export const MAX_ACTUAL_BYTES = 1024 * 1024;
 export const MAX_OUTPUT_BYTES = RUN_LIMITS.outputBytes;
 export const MAX_RUNNER_RESPONSE_BYTES = MAX_ACTUAL_BYTES + 128 * 1024;
@@ -10,7 +9,7 @@ const MAX_DIAGNOSTIC_CHARS = 2000;
 const RUNNER_REQUEST_TIMEOUT_MS = 60_000;
 
 interface RunnerJobBase {
-  protocol: typeof RUNNER_PROTOCOL | typeof LEGACY_RUNNER_PROTOCOL;
+  protocol: typeof RUNNER_PROTOCOL;
   runId: string;
   testId: string;
   source: string;
@@ -97,8 +96,7 @@ export function parseRunnerResult(
   ) {
     throw new RunnerProtocolError('Runner response identity does not match the job.');
   }
-  if (record.format !== job.format &&
-    (job.protocol !== LEGACY_RUNNER_PROTOCOL || record.format !== undefined)) {
+  if (record.format !== job.format) {
     throw new RunnerProtocolError('Runner response format does not match the job.');
   }
   if (typeof record.outcome !== 'string' || !OUTCOMES.has(record.outcome)) {

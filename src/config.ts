@@ -17,6 +17,8 @@ export interface RawCriterion {
   expectedBehavior: string;
 }
 
+// A draft can contain fields from both formats so validation can report the
+// offending fields. A saved TestCase always uses one comparison rule.
 export interface RawTest {
   id: string;
   arguments?: string;
@@ -276,16 +278,16 @@ function validateScriptTest(
   };
 }
 
+type ScriptTextField = 'stdin' | 'expectedStdout';
+
 function validateScriptText(
   value: string | undefined,
-  field: 'stdin' | 'expectedStdout',
+  field: ScriptTextField,
   rowErrors: RowFieldErrors,
 ): string {
   const label = field === 'stdin' ? 'Standard input' : 'Expected stdout';
   if (value === undefined) {
-    rowErrors[field] = field === 'stdin'
-      ? 'Enter standard input. Use an empty string when the test supplies no input.'
-      : 'Enter expected stdout. Use an empty string when the test expects no output.';
+    rowErrors[field] = `${label} must be a string. Use an empty string when blank.`;
     return '';
   }
   if (!roundTripsAsUtf8(value)) {
@@ -321,12 +323,12 @@ function validateRows<RawRow extends { id: string }, SavedRow>(
   errors: ConfigErrors,
   key: 'criteria' | 'tests',
   validateFields: (row: RawRow, id: string, rowErrors: RowFieldErrors) => SavedRow,
-  keepBlankRow?: (row: RawRow) => boolean,
+  hasWrongFormatFields?: (row: RawRow) => boolean,
 ): SavedRow[] {
   const isRubric = key === 'criteria';
   const rows = rawRows
     .map((row, index) => ({ row, index }))
-    .filter(({ row }) => keepBlankRow?.(row) || Object.values(row).some(
+    .filter(({ row }) => hasWrongFormatFields?.(row) || Object.values(row).some(
       (value) => typeof value === 'string' && value.trim() !== '',
     ));
 

@@ -10,6 +10,9 @@ A Python exercise with a stable identity across revisions and one active version
 **Assignment version**  
 An immutable snapshot of an assignment's task and format, including the exact rubric and test suite versions in use.
 
+**Assignment format**\
+The way a Python submission is exercised and assessed: by calling a function or by running a script.
+
 **Function assignment**  
 A Python exercise whose test cases call a named function and check the value it returns.
 
@@ -23,7 +26,10 @@ An expectation used to assess a submission. Its stable identifier lets a feedbac
 An immutable, ordered set of rubric criteria used to assess submissions for an assignment.
 
 **Test suite version**  
-An immutable, ordered set of tests and their expected outcomes for an assignment.
+An immutable, ordered set of tests and their expected outcomes for an assignment. All tests in the suite use the same assignment format.
+
+**Comparison rule**\
+The versioned criteria that determine whether a function return value or a script's standard output matches the corresponding expectation.
 
 **Submission version**  
 A particular snapshot of a synthetic Python submission, including the source that was tested and reviewed.
