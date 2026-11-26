@@ -338,6 +338,7 @@ def capture(
     memory_limited = False
     peak_memory = 0
     open_streams = 2
+    next_memory_check = 0.0
 
     # Keep observing until the whole process tree has exited and its output
     # pipes are closed. A submission can close its pipes and keep running; that
@@ -348,7 +349,13 @@ def capture(
             timed_out = True
             kill_group(process)
             break
-        peak_memory = max(peak_memory, process_tree_rss(process.pid))
+        # Scanning /proc is expensive for the 0.25 vCPU container. A 100 ms
+        # cadence preserves the aggregate memory cap without starving the
+        # submission under the 2 s execution deadline.
+        now = time.monotonic()
+        if now >= next_memory_check:
+            peak_memory = max(peak_memory, process_tree_rss(process.pid))
+            next_memory_check = now + 0.1
         if peak_memory >= memory_bytes:
             memory_limited = True
             kill_group(process)
