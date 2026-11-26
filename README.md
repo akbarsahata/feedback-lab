@@ -163,7 +163,7 @@ Each test runs in a fresh native Python execution with standard library only. Th
 
 The native runner lives in [`runner/`](runner/README.md), and its private Container Worker adapter lives in [`runner-worker/`](runner-worker). The Worker publishes committed runs through `feedback-lab-test-runs`; the queue consumer calls the private `RUNNER` service binding. Each **Test run** gets its own container instance, so state from one run cannot affect another. Within a run, each test still executes in a fresh Python child process.
 
-The deployed runner uses the `basic` instance (0.25 vCPU, 1024 MiB), Python `3.12.11`, `enableInternet: false`, and the per-test limits above. The hosted issue #2 baseline is in [`docs/verification/issue-2-hosted-runner.md`](docs/verification/issue-2-hosted-runner.md); the issue #3 record in [`docs/verification/issue-3-hosted-runner.md`](docs/verification/issue-3-hosted-runner.md) distinguishes local checks from hosted verification that is still pending. Local tests use a fake runner and the Python contract tests; a local or fake-runner pass does not close a hosted gate.
+The deployed runner uses the `basic` instance (0.25 vCPU, 1024 MiB), Python `3.12.11`, `enableInternet: false`, and the per-test limits above. The hosted issue #2 baseline is in [`docs/verification/issue-2-hosted-runner.md`](docs/verification/issue-2-hosted-runner.md); the issue #3 record in [`docs/verification/issue-3-hosted-runner.md`](docs/verification/issue-3-hosted-runner.md) records the deployed versions and hosted checks, including the long-suite CPU limitation. Local tests use a fake runner and the Python contract tests; a local or fake-runner pass does not replace hosted evidence.
 
 ## Deployment
 
@@ -218,12 +218,12 @@ For an initial deployment, authenticate Wrangler and select the Cloudflare accou
 - [x] Restore the runner and confirm a new known-good run succeeds without changing the interrupted run.
 - [x] Confirm cold and warm runner timing are shown separately from execution time.
 - [x] Reopen a saved run after editing the assignment and confirm its source, expected values, and results still resolve to the original versions.
-- [ ] Apply migration 0003 to a copy of production data; confirm `PRAGMA foreign_key_check` is empty, row counts and IDs are unchanged, and an old function run still opens.
-- [ ] Create a script assignment with explicit empty input/output and with CRLF text; confirm the saved values and a no-op resave.
-- [ ] Switch a function assignment to script, then reopen the earlier run; confirm the original format, source, arguments, expected return, and results.
-- [ ] On the deployed runner, demonstrate script `__main__`, stdin to EOF, expected `7` matching `7\n`, empty output, an extra-space mismatch, a nonzero exit, and output truncation. Confirm the shared 2 s / 128 MiB / 16 KiB limits still apply.
-- [ ] Open `/api/docs` as a researcher and run a GET with Try it out; confirm POST Try it out is unavailable. Confirm signed-out users and members cannot fetch the docs page, spec, or assets.
-- [ ] Record the deployed revision, runner artifact, Python release, limits, and observed results in `docs/verification/issue-3-hosted-runner.md`. Local tests alone do not close issue #3.
+- [x] Apply migration 0003 with a pre-migration export; confirm `PRAGMA foreign_key_check` is empty, row counts and IDs are unchanged, and an old function run still opens.
+- [x] Create a script assignment with explicit empty input/output and with CRLF text; confirm the saved values and a no-op resave.
+- [x] Switch a function assignment to script, then reopen the earlier run; confirm the original format, source, arguments, expected return, and results.
+- [x] On the deployed runner, demonstrate script `__main__`, stdin to EOF, expected `7` matching `7\n`, empty output, an extra-space mismatch, a nonzero exit, and output truncation. Confirm the shared 2 s / 128 MiB / 16 KiB limits still apply.
+- [x] Open `/api/docs` as a researcher and run a GET with Try it out; confirm POST Try it out is unavailable. Confirm signed-out users and members cannot fetch the docs page, spec, or assets.
+- [x] Record the deployed revision, runner artifact, Python release, limits, and observed results in `docs/verification/issue-3-hosted-runner.md`.
 
 ## Implementation notes and deviations
 
